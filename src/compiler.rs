@@ -56,6 +56,15 @@ fn encode_stmt(output: &mut String, statement: &Stmt) {
             encode_optional_expr(output, value.as_ref());
             output.push(')');
         }
+        Stmt::While { condition, body } => {
+            output.push_str("(while ");
+            encode_expr(output, condition);
+            output.push(' ');
+            encode_block(output, body);
+            output.push(')');
+        }
+        Stmt::Break => output.push_str("(break)"),
+        Stmt::Continue => output.push_str("(continue)"),
         Stmt::For {
             name,
             iterable,

@@ -12,16 +12,8 @@ is_ident_continue(ch) => is_ident_start(ch) || is_digit(ch)
 
 characters(text) {
     var output = []
-    for ch in text { push(output, ch) }
-    return output
-}
-
-slice(text, start, end) {
-    var output = ""
-    for index in range(start, end) {
-        output = output + text[index]
-    }
-    return output
+    for ch in text { output.push(ch) }
+    output
 }
 
 keyword_kind(text) {
@@ -34,6 +26,9 @@ keyword_kind(text) {
     if text == "if" { return "if" }
     if text == "else" { return "else" }
     if text == "for" { return "for" }
+    if text == "while" { return "while" }
+    if text == "break" { return "break" }
+    if text == "continue" { return "continue" }
     if text == "in" { return "in" }
     if text == "when" { return "when" }
     if text == "return" { return "return" }
@@ -45,7 +40,7 @@ keyword_kind(text) {
     if text == "await" { return "await" }
     if text == "try" { return "try" }
     if text == "throw" { return "throw" }
-    return null
+    null
 }
 
 decode_escape(ch) {
@@ -56,115 +51,121 @@ decode_escape(ch) {
     if ch == "\\" { return "\\" }
     if ch == "\"" { return "\"" }
     if ch == "$" { return "$" }
-    return ch
+    ch
 }
 
-scan_comment_end(source, index) {
-    if index >= len(source) { return index }
-    if source[index] == "\n" { return index }
-    return scan_comment_end(source, index + 1)
-}
+THREE_CHAR_SYMBOLS = ["..="]
+TWO_CHAR_SYMBOLS = [
+    "==", "!=", "<=", ">=", "&&", "||", "|>", "..", "?.", "?:", "=>", "->",
+    "+=", "-=", "*=", "/=", "%="
+]
+SINGLE_CHAR_SYMBOLS = [
+    "=", "+", "-", "*", "/", "%", "<", ">", "!", ".", ",", ":", ";", "?", "|",
+    "(", ")", "{", "}", "[", "]"
+]
 
-scan_ident_end(source, index) {
-    if index >= len(source) { return index }
-    if !is_ident_continue(source[index]) { return index }
-    return scan_ident_end(source, index + 1)
-}
-
-scan_number(source, index, dot) {
-    if index >= len(source) { return [index, dot] }
-    current = source[index]
-    if is_digit(current) { return scan_number(source, index + 1, dot) }
-    if current == "." && !dot && index + 1 < len(source) && is_digit(source[index + 1]) {
-        return scan_number(source, index + 1, true)
+take_while(input, predicate) {
+    var output = ""
+    while !input.done() && predicate(input.current()) {
+        output += input.take()
     }
-    return [index, dot]
+    output
 }
 
-scan_string(source, index, value, escaped) {
-    if index >= len(source) {
-        assert(false, "unterminated string literal")
-        return [value, index]
+skip_while(input, predicate) {
+    while !input.done() && predicate(input.current()) {
+        input.advance()
     }
-    current = source[index]
-    if escaped {
-        return scan_string(source, index + 1, value + decode_escape(current), false)
+}
+
+scan_number(input) {
+    var text = take_while(input, |ch| is_digit(ch))
+    next = input.peek()
+    if input.current() == "." && next != null && is_digit(next) {
+        text += input.take()
+        text += take_while(input, |ch| is_digit(ch))
+        return Token("float", text)
     }
-    if current == "\\" { return scan_string(source, index + 1, value, true) }
-    if current == "\"" { return [value, index + 1] }
-    return scan_string(source, index + 1, value + current, false)
+    Token("int", text)
+}
+
+scan_string(input) {
+    input.advance()
+    var value = ""
+    while !input.done() {
+        ch = input.take()
+        if ch == "\"" { return Token("string", value) }
+        if ch == "\n" {
+            assert(false, "unterminated string literal")
+        }
+        if ch == "\\" {
+            assert(!input.done(), "unterminated string escape")
+            value += decode_escape(input.take())
+        } else {
+            value += ch
+        }
+    }
+    assert(false, "unterminated string literal")
+    Token("string", value)
+}
+
+scan_identifier(input) {
+    text = take_while(input, |ch| is_ident_continue(ch))
+    keyword = keyword_kind(text)
+    kind = keyword ?: if is_upper(text.first()) { "data-ident" } else { "ident" }
+    Token(kind, text)
+}
+
+scan_symbol(input) {
+    triple = input.peek_string(3)
+    if triple in THREE_CHAR_SYMBOLS {
+        input.advance(3)
+        return Token(triple, triple)
+    }
+
+    pair = input.peek_string(2)
+    if pair in TWO_CHAR_SYMBOLS {
+        input.advance(2)
+        return Token(pair, pair)
+    }
+
+    ch = input.take()
+    assert(ch in SINGLE_CHAR_SYMBOLS, "unexpected character in source")
+    Token(if ch == ";" { "sep" } else { ch }, ch)
+}
+
+next_token(input) {
+    ch = input.current()
+    if ch in [" ", "\t", "\r"] {
+        input.advance()
+        return null
+    }
+    if ch == "\n" {
+        input.advance()
+        return Token("sep", "\n")
+    }
+    if input.starts_with("//") {
+        input.advance(2)
+        skip_while(input, |value| value != "\n")
+        return null
+    }
+    if is_digit(ch) { return scan_number(input) }
+    if ch == "\"" { return scan_string(input) }
+    if is_ident_start(ch) { return scan_identifier(input) }
+    scan_symbol(input)
 }
 
 lex(source) {
     var result = []
-    chars = characters(source)
-    var index = 0
-    length = len(chars)
+    input = source.cursor()
 
-    for step in range(length) {
-        if step == index {
-            ch = chars[index]
-            next = if index + 1 < length { chars[index + 1] } else { "" }
-            third = if index + 2 < length { chars[index + 2] } else { "" }
-
-            if ch == " " || ch == "\t" || ch == "\r" {
-                index = index + 1
-            } else if ch == "\n" {
-                push(result, Token("sep", "\n"))
-                index = index + 1
-            } else if ch == "/" && next == "/" {
-                index = scan_comment_end(chars, index + 2)
-            } else if is_digit(ch) {
-                scan = scan_number(chars, index + 1, false)
-                end = scan[0]
-                dot = scan[1]
-                text = slice(chars, index, end)
-                kind = if dot { "float" } else { "int" }
-                push(result, Token(kind, text))
-                index = end
-            } else if ch == "\"" {
-                scan = scan_string(chars, index + 1, "", false)
-                value = scan[0]
-                end = scan[1]
-                push(result, Token("string", value))
-                index = end
-            } else if is_ident_start(ch) {
-                end = scan_ident_end(chars, index + 1)
-                text = slice(chars, index, end)
-                keyword = keyword_kind(text)
-                if keyword != null {
-                    push(result, Token(keyword, text))
-                } else if is_upper(ch) {
-                    push(result, Token("data-ident", text))
-                } else {
-                    push(result, Token("ident", text))
-                }
-                index = end
-            } else {
-                pair = ch + next
-                triple = pair + third
-                if triple == "..=" {
-                    push(result, Token(triple, triple))
-                    index = index + 3
-                } else if pair == "==" || pair == "!=" || pair == "<=" || pair == ">=" || pair == "&&" || pair == "||" || pair == "|>" || pair == ".." || pair == "?." || pair == "?:" || pair == "=>" || pair == "->" {
-                    push(result, Token(pair, pair))
-                    index = index + 2
-                } else {
-                    valid = ch == "=" || ch == "+" || ch == "-" || ch == "*" || ch == "/" || ch == "%" || ch == "<" || ch == ">" || ch == "!" || ch == "." || ch == "," || ch == ":" || ch == ";" || ch == "?" || ch == "|" || ch == "(" || ch == ")" || ch == "{" || ch == "}" || ch == "[" || ch == "]"
-                    assert(valid, "unexpected character in source")
-                    if ch == ";" {
-                        push(result, Token("sep", ch))
-                    } else {
-                        push(result, Token(ch, ch))
-                    }
-                    index = index + 1
-                }
-            }
-        }
+    while !input.done() {
+        token = next_token(input)
+        if token != null { result.push(token) }
     }
 
-    push(result, Token("eof", ""))
-    return result
+    result.push(Token("eof", ""))
+    result
 }
 
 quote(value) {
@@ -190,22 +191,39 @@ quote(value) {
 }
 
 
-find_interpolation_end(value, index, depth, in_string, escaped) {
-    if index >= len(value) { return -1 }
-    ch = value[index]
-    if in_string {
-        if escaped { return find_interpolation_end(value, index + 1, depth, true, false) }
-        if ch == "\\" { return find_interpolation_end(value, index + 1, depth, true, true) }
-        if ch == "\"" { return find_interpolation_end(value, index + 1, depth, false, false) }
-        return find_interpolation_end(value, index + 1, depth, true, false)
+find_interpolation_end(value, index) {
+    input = value.cursor()
+    input.advance(index)
+    var depth = 1
+    var in_string = false
+    var escaped = false
+
+    while !input.done() {
+        current_position = input.position()
+        ch = input.take()
+
+        if in_string {
+            if escaped {
+                escaped = false
+            } else if ch == "\\" {
+                escaped = true
+            } else if ch == "\"" {
+                in_string = false
+            }
+            continue
+        }
+
+        if ch == "\"" {
+            in_string = true
+        } else if ch == "{" {
+            depth += 1
+        } else if ch == "}" {
+            depth -= 1
+            if depth == 0 { return current_position }
+        }
     }
-    if ch == "\"" { return find_interpolation_end(value, index + 1, depth, true, false) }
-    if ch == "{" { return find_interpolation_end(value, index + 1, depth + 1, false, false) }
-    if ch == "}" {
-        if depth == 1 { return index }
-        return find_interpolation_end(value, index + 1, depth - 1, false, false)
-    }
-    return find_interpolation_end(value, index + 1, depth, false, false)
+
+    -1
 }
 
 compile_expression_fragment(source) {
@@ -218,12 +236,12 @@ compile_expression_fragment(source) {
     expect("eof")
     parse_tokens = old_tokens
     parse_cursor = old_cursor
-    return expr
+    expr
 }
 
 combine_interpolation_parts(parts, index, output) {
     if index >= len(parts) { return output }
-    return combine_interpolation_parts(parts, index + 1, binary(output, "add", parts[index]))
+    combine_interpolation_parts(parts, index + 1, binary(output, "add", parts[index]))
 }
 
 interpolate_string(value) {
@@ -231,33 +249,34 @@ interpolate_string(value) {
     var literal = ""
     var index = 0
     length = len(value)
-    for step in range(length) {
-        if step == index {
-            ch = value[index]
-            next = if index + 1 < length { value[index + 1] } else { "" }
-            if ch == "$" && next == "$" {
-                literal = literal + "$"
-                index = index + 2
-            } else if ch == "$" && next == "{" {
-                if literal != "" {
-                    push(parts, "(string " + quote(literal) + ")")
-                    literal = ""
-                }
-                end = find_interpolation_end(value, index + 2, 1, false, false)
-                assert(end >= 0, "unterminated string interpolation")
-                fragment = slice(value, index + 2, end)
-                assert(trim(fragment) != "", "string interpolation cannot be empty")
-                expr = compile_expression_fragment(fragment)
-                push(parts, "(call (ident \"string\") (args " + expr + "))")
-                index = end + 1
-            } else {
-                literal = literal + ch
-                index = index + 1
+
+    while index < length {
+        ch = value[index]
+        next = value.get(index + 1) ?: ""
+
+        if ch == "$" && next == "$" {
+            literal += "$"
+            index += 2
+        } else if ch == "$" && next == "{" {
+            if literal != "" {
+                parts.push("(string " + quote(literal) + ")")
+                literal = ""
             }
+            end = find_interpolation_end(value, index + 2)
+            assert(end >= 0, "unterminated string interpolation")
+            fragment = value[index + 2..end]
+            assert(trim(fragment) != "", "string interpolation cannot be empty")
+            expr = compile_expression_fragment(fragment)
+            parts.push("(call (ident \"string\") (args " + expr + "))")
+            index = end + 1
+        } else {
+            literal += ch
+            index += 1
         }
     }
-    if literal != "" || len(parts) == 0 { push(parts, "(string " + quote(literal) + ")") }
-    return combine_interpolation_parts(parts, 1, parts[0])
+
+    if literal != "" || len(parts) == 0 { parts.push("(string " + quote(literal) + ")") }
+    combine_interpolation_parts(parts, 1, parts[0])
 }
 
 current_kind() {
@@ -372,14 +391,12 @@ parse_params() {
 parse_program() {
     consume_separators()
     var output = "(program"
-    for step in range(len(parse_tokens)) {
-        if !at("eof") {
-            output = output + " " + parse_statement()
-            if !at("eof") { consume_separators() }
-        }
+    while !at("eof") {
+        output += " " + parse_statement()
+        if !at("eof") { consume_separators() }
     }
     expect("eof")
-    return output + ")"
+    output + ")"
 }
 
 parse_statement() {
@@ -388,6 +405,9 @@ parse_statement() {
     if eat("var") { return parse_var() }
     if eat("return") { return parse_return() }
     if eat("require") { return parse_require() }
+    if eat("while") { return parse_while() }
+    if eat("break") { return "(break)" }
+    if eat("continue") { return "(continue)" }
     if eat("for") { return parse_for() }
     if at("if") { return "(expr " + parse_if() + ")" }
     if at("when") { return "(expr " + parse_when() + ")" }
@@ -399,6 +419,20 @@ parse_statement() {
         value = parse_expression()
         return "(assign " + target + " " + value + ")"
     }
+
+    var op = null
+    if eat("+=") { op = "add" }
+    else if eat("-=") { op = "subtract" }
+    else if eat("*=") { op = "multiply" }
+    else if eat("/=") { op = "divide" }
+    else if eat("%=") { op = "remainder" }
+
+    if op != null {
+        assert(len(target) >= 7 && target[0..7] == "(ident ", "compound assignment currently requires an identifier target")
+        value = parse_expression()
+        return "(assign " + target + " " + binary(target, op, value) + ")"
+    }
+
     return "(expr " + target + ")"
 }
 
@@ -430,10 +464,16 @@ parse_require() {
     return "(expr (call (ident \"assert\") " + args + ")))"
 }
 
-prepend_block_statement(body, statement) => "(block " + statement + slice(body, 6, len(body))
+prepend_block_statement(body, statement) => "(block " + statement + body[6..len(body)]
+
+parse_while() {
+    condition = parse_expression()
+    body = parse_block()
+    return "(while " + condition + " " + body + ")"
+}
 
 parse_for() {
-    pattern = parse_expression()
+    pattern = parse_postfix()
     expect("in")
     iterable = parse_expression()
     parsed_body = parse_block()
@@ -604,6 +644,10 @@ parse_range() {
 }
 
 parse_comparison_tail(expr) {
+    if eat("in") {
+        right = parse_range()
+        return parse_comparison_tail("(call (ident \"contains\") (args " + right + " " + expr + "))")
+    }
     if eat("<") { return parse_comparison_tail(binary(expr, "less", parse_range())) }
     if eat("<=") { return parse_comparison_tail(binary(expr, "less-equal", parse_range())) }
     if eat(">") { return parse_comparison_tail(binary(expr, "greater", parse_range())) }
@@ -647,6 +691,26 @@ parse_args_tail(args) {
     return next_args
 }
 
+index_range_kind(start) {
+    var index = start
+    var depth = 0
+    while index < len(parse_tokens) {
+        kind = kind_at(index)
+        if kind == "(" || kind == "[" || kind == "{" {
+            depth += 1
+        } else if kind == "]" {
+            if depth == 0 { return null }
+            depth -= 1
+        } else if kind == ")" || kind == "}" {
+            if depth > 0 { depth -= 1 }
+        } else if depth == 0 && (kind == ".." || kind == "..=") {
+            return kind
+        }
+        index += 1
+    }
+    null
+}
+
 parse_postfix_tail(expr) {
     if eat("(") {
         consume_separators()
@@ -661,6 +725,16 @@ parse_postfix_tail(expr) {
         return parse_postfix_tail("(member " + expr + " " + quote(take_name()) + " true)")
     }
     if eat("[") {
+        range_kind = index_range_kind(parse_cursor)
+        if range_kind != null {
+            start = parse_additive()
+            inclusive = eat("..=")
+            if !inclusive { expect("..") }
+            end = parse_additive()
+            expect("]")
+            callee = if inclusive { "slice_inclusive" } else { "slice" }
+            return parse_postfix_tail("(call (ident \"" + callee + "\") (args " + expr + " " + start + " " + end + "))")
+        }
         index = parse_expression()
         expect("]")
         return parse_postfix_tail("(index " + expr + " " + index + ")")
