@@ -1,0 +1,20 @@
+[package]
+name = "velra"
+version = "0.1.0"
+edition = "2021"
+description = "A clean, minimal programming language with a Rust bootstrap implementation"
+license = "GPL-3.0-only"
+repository = "https://github.com/cybellereaper/velra"
+rust-version = "1.74"
+
+[lib]
+name = "velra"
+path = "src/lib.rs"
+
+[[bin]]
+name = "velra"
+path = "src/main.rs"
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
