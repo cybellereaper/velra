@@ -95,7 +95,8 @@ fn compile_file(input: &str, output: &str) -> Result<(), String> {
 
 fn exec_file(path: &str) -> Result<(), String> {
     let artifact = read_source(path)?;
-    let program = load_artifact(&artifact).map_err(|error| render_error(path, &artifact, &error))?;
+    let program =
+        load_artifact(&artifact).map_err(|error| render_error(path, &artifact, &error))?;
     execute(path, program)
 }
 
