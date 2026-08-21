@@ -130,6 +130,7 @@ impl fmt::Display for Value {
 pub struct Record {
     pub name: String,
     pub fields: BTreeMap<String, Value>,
+    pub positional_fields: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -305,11 +306,74 @@ impl Interpreter {
 
     fn assign_target(&mut self, target: &Expr, value: Value, env: EnvRef) -> EvalResult<()> {
         match target {
+            Expr::Ident(name) if name == "_" => Ok(()),
             Expr::Ident(name) => {
                 if binding_exists(&env, name) {
                     assign(&env, name, value)?;
                 } else {
                     define(&env, name, value, false)?;
+                }
+                Ok(())
+            }
+            Expr::List(patterns) => {
+                let Value::List(values) = value else {
+                    return Err(RuntimeError::new("list destructuring expects List").into());
+                };
+                let values = values.borrow().clone();
+                if patterns.len() != values.len() {
+                    return Err(RuntimeError::new(format!(
+                        "list destructuring expects {} values, got {}",
+                        patterns.len(),
+                        values.len()
+                    ))
+                    .into());
+                }
+                for (pattern, value) in patterns.iter().zip(values) {
+                    self.assign_target(pattern, value, Rc::clone(&env))?;
+                }
+                Ok(())
+            }
+            Expr::Call { callee, args } => {
+                let Expr::Ident(expected_name) = callee.as_ref() else {
+                    return Err(
+                        RuntimeError::new("constructor destructuring expects a type name").into(),
+                    );
+                };
+                let Value::Record(record) = value else {
+                    return Err(RuntimeError::new(format!(
+                        "{expected_name} destructuring expects a record"
+                    ))
+                    .into());
+                };
+                if &record.name != expected_name {
+                    return Err(RuntimeError::new(format!(
+                        "expected {expected_name}, got {}",
+                        record.name
+                    ))
+                    .into());
+                }
+                if args.len() != record.positional_fields.len() {
+                    return Err(RuntimeError::new(format!(
+                        "{} pattern expects {} fields, got {}",
+                        record.name,
+                        record.positional_fields.len(),
+                        args.len()
+                    ))
+                    .into());
+                }
+                let values: Vec<Value> = record
+                    .positional_fields
+                    .iter()
+                    .map(|name| {
+                        record
+                            .fields
+                            .get(name)
+                            .expect("positional record field must exist")
+                            .clone()
+                    })
+                    .collect();
+                for (pattern, value) in args.iter().zip(values) {
+                    self.assign_target(pattern, value, Rc::clone(&env))?;
                 }
                 Ok(())
             }
@@ -331,6 +395,73 @@ impl Interpreter {
                 }
             }
             _ => Err(RuntimeError::new("invalid assignment target").into()),
+        }
+    }
+
+    fn match_pattern(&mut self, pattern: &Expr, value: &Value, env: EnvRef) -> EvalResult<bool> {
+        match pattern {
+            Expr::Ident(name) if name == "_" => Ok(true),
+            Expr::Ident(name) if is_binding_pattern_name(name) => {
+                define(&env, name, value.clone(), false)?;
+                Ok(true)
+            }
+            Expr::List(patterns) => {
+                let Value::List(values) = value else {
+                    return Ok(false);
+                };
+                let values = values.borrow().clone();
+                if patterns.len() != values.len() {
+                    return Ok(false);
+                }
+                for (pattern, value) in patterns.iter().zip(values.iter()) {
+                    if !self.match_pattern(pattern, value, Rc::clone(&env))? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            Expr::Call { callee, args } => {
+                let Expr::Ident(expected_name) = callee.as_ref() else {
+                    let expected = self.eval_expr(pattern, env)?;
+                    return Ok(values_equal(value, &expected));
+                };
+                let Value::Record(record) = value else {
+                    return Ok(false);
+                };
+                if &record.name != expected_name {
+                    return Ok(false);
+                }
+                if args.len() != record.positional_fields.len() {
+                    return Err(RuntimeError::new(format!(
+                        "{} pattern expects {} fields, got {}",
+                        record.name,
+                        record.positional_fields.len(),
+                        args.len()
+                    ))
+                    .into());
+                }
+                for (pattern, field_name) in args.iter().zip(record.positional_fields.iter()) {
+                    let field = record
+                        .fields
+                        .get(field_name)
+                        .expect("positional record field must exist");
+                    if !self.match_pattern(pattern, field, Rc::clone(&env))? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            _ => {
+                let expected = self.eval_expr(pattern, env)?;
+                Ok(values_equal(value, &expected))
+            }
+        }
+    }
+
+    fn eval_when_body(&mut self, body: &WhenBody, env: EnvRef) -> EvalResult<Value> {
+        match body {
+            WhenBody::Expr(expr) => self.eval_expr(expr, env),
+            WhenBody::Block(block) => self.eval_block(block, env),
         }
     }
 
@@ -362,6 +493,31 @@ impl Interpreter {
             }
             Expr::Binary { left, op, right } => self.eval_binary(left, *op, right, env),
             Expr::Call { callee, args } => {
+                if let Expr::Member { object, name, safe } = callee.as_ref() {
+                    let receiver = self.eval_expr(object, Rc::clone(&env))?;
+                    if *safe && matches!(receiver, Value::Null) {
+                        return Ok(Value::Null);
+                    }
+                    let mut argument_values = Vec::with_capacity(args.len());
+                    for arg in args {
+                        argument_values.push(self.eval_expr(arg, Rc::clone(&env))?);
+                    }
+                    match member(receiver.clone(), name) {
+                        Ok(member_value) => return self.call(member_value, argument_values),
+                        Err(member_error) => {
+                            if let Some(function) = get(&env, name) {
+                                if is_callable(&function) {
+                                    let mut values = Vec::with_capacity(argument_values.len() + 1);
+                                    values.push(receiver);
+                                    values.extend(argument_values);
+                                    return self.call(function, values);
+                                }
+                            }
+                            return Err(member_error.into());
+                        }
+                    }
+                }
+
                 let callee = self.eval_expr(callee, Rc::clone(&env))?;
                 let mut values = Vec::with_capacity(args.len());
                 for arg in args {
@@ -404,43 +560,41 @@ impl Interpreter {
                 };
 
                 for case in cases {
-                    let matched = if case.is_else {
-                        true
-                    } else if let Some(subject) = &subject {
-                        let mut matched = false;
-                        for pattern in &case.patterns {
-                            let pattern = self.eval_expr(pattern, Rc::clone(&env))?;
-                            if values_equal(subject, &pattern) {
-                                matched = true;
-                                break;
-                            }
-                        }
-                        matched
-                    } else {
-                        let mut matched = false;
-                        for pattern in &case.patterns {
-                            let pattern = self.eval_expr(pattern, Rc::clone(&env))?;
-                            if pattern.expect_bool("when condition")? {
-                                matched = true;
-                                break;
-                            }
-                        }
-                        matched
-                    };
+                    if case.is_else {
+                        let case_env = Environment::child(&env);
+                        return self.eval_when_body(&case.body, case_env);
+                    }
 
-                    if !matched {
-                        continue;
-                    }
-                    if let Some(guard) = &case.guard {
-                        let guard = self.eval_expr(guard, Rc::clone(&env))?;
-                        if !guard.expect_bool("when guard")? {
-                            continue;
+                    if let Some(subject) = &subject {
+                        for pattern in &case.patterns {
+                            let case_env = Environment::child(&env);
+                            if !self.match_pattern(pattern, subject, Rc::clone(&case_env))? {
+                                continue;
+                            }
+                            if let Some(guard) = &case.guard {
+                                let guard = self.eval_expr(guard, Rc::clone(&case_env))?;
+                                if !guard.expect_bool("when guard")? {
+                                    continue;
+                                }
+                            }
+                            return self.eval_when_body(&case.body, case_env);
+                        }
+                    } else {
+                        for condition in &case.patterns {
+                            let case_env = Environment::child(&env);
+                            let condition = self.eval_expr(condition, Rc::clone(&case_env))?;
+                            if !condition.expect_bool("when condition")? {
+                                continue;
+                            }
+                            if let Some(guard) = &case.guard {
+                                let guard = self.eval_expr(guard, Rc::clone(&case_env))?;
+                                if !guard.expect_bool("when guard")? {
+                                    continue;
+                                }
+                            }
+                            return self.eval_when_body(&case.body, case_env);
                         }
                     }
-                    return match &case.body {
-                        WhenBody::Expr(expr) => self.eval_expr(expr, env),
-                        WhenBody::Block(block) => self.eval_block(block, env),
-                    };
                 }
                 Ok(Value::Null)
             }
@@ -526,6 +680,7 @@ impl Interpreter {
                 Ok(Value::Record(Rc::new(Record {
                     name: data.name.clone(),
                     fields,
+                    positional_fields: data.params.iter().map(|param| param.name.clone()).collect(),
                 })))
             }
             value => Err(RuntimeError::new(format!(
@@ -597,7 +752,15 @@ fn install_builtins(env: &EnvRef) {
         ("type", builtin_type as NativeFn),
         ("assert", builtin_assert as NativeFn),
         ("range", builtin_range as NativeFn),
+        ("range_inclusive", builtin_range_inclusive as NativeFn),
         ("push", builtin_push as NativeFn),
+        ("contains", builtin_contains as NativeFn),
+        ("first", builtin_first as NativeFn),
+        ("last", builtin_last as NativeFn),
+        ("is_empty", builtin_is_empty as NativeFn),
+        ("trim", builtin_trim as NativeFn),
+        ("upper", builtin_upper as NativeFn),
+        ("lower", builtin_lower as NativeFn),
         ("read", builtin_read as NativeFn),
         ("write", builtin_write as NativeFn),
     ] {
@@ -689,6 +852,15 @@ fn builtin_range(args: Vec<Value>) -> RuntimeResult<Value> {
     Ok(Value::List(Rc::new(RefCell::new(values))))
 }
 
+fn builtin_range_inclusive(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("range_inclusive", 2, args.len())?;
+    let [Value::Int(start), Value::Int(end)] = args.as_slice() else {
+        return Err(RuntimeError::new("range_inclusive() arguments must be Int"));
+    };
+    let values = (*start..=*end).map(Value::Int).collect();
+    Ok(Value::List(Rc::new(RefCell::new(values))))
+}
+
 fn builtin_push(args: Vec<Value>) -> RuntimeResult<Value> {
     require_arity("push", 2, args.len())?;
     let Value::List(values) = &args[0] else {
@@ -696,6 +868,97 @@ fn builtin_push(args: Vec<Value>) -> RuntimeResult<Value> {
     };
     values.borrow_mut().push(args[1].clone());
     Ok(Value::Null)
+}
+
+fn builtin_contains(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("contains", 2, args.len())?;
+    let contains = match (&args[0], &args[1]) {
+        (Value::List(values), needle) => values
+            .borrow()
+            .iter()
+            .any(|value| values_equal(value, needle)),
+        (Value::String(value), Value::String(needle)) => value.contains(needle),
+        (Value::Record(record), Value::String(field)) => record.fields.contains_key(field),
+        (value, _) => {
+            return Err(RuntimeError::new(format!(
+                "contains() does not accept {}",
+                value.type_name()
+            )))
+        }
+    };
+    Ok(Value::Bool(contains))
+}
+
+fn builtin_first(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("first", 1, args.len())?;
+    match &args[0] {
+        Value::List(values) => Ok(values.borrow().first().cloned().unwrap_or(Value::Null)),
+        Value::String(value) => Ok(value
+            .chars()
+            .next()
+            .map(|ch| Value::String(ch.to_string()))
+            .unwrap_or(Value::Null)),
+        value => Err(RuntimeError::new(format!(
+            "first() does not accept {}",
+            value.type_name()
+        ))),
+    }
+}
+
+fn builtin_last(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("last", 1, args.len())?;
+    match &args[0] {
+        Value::List(values) => Ok(values.borrow().last().cloned().unwrap_or(Value::Null)),
+        Value::String(value) => Ok(value
+            .chars()
+            .next_back()
+            .map(|ch| Value::String(ch.to_string()))
+            .unwrap_or(Value::Null)),
+        value => Err(RuntimeError::new(format!(
+            "last() does not accept {}",
+            value.type_name()
+        ))),
+    }
+}
+
+fn builtin_is_empty(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("is_empty", 1, args.len())?;
+    let empty = match &args[0] {
+        Value::List(values) => values.borrow().is_empty(),
+        Value::String(value) => value.is_empty(),
+        Value::Record(record) => record.fields.is_empty(),
+        value => {
+            return Err(RuntimeError::new(format!(
+                "is_empty() does not accept {}",
+                value.type_name()
+            )))
+        }
+    };
+    Ok(Value::Bool(empty))
+}
+
+fn builtin_trim(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("trim", 1, args.len())?;
+    let Value::String(value) = &args[0] else {
+        return Err(RuntimeError::new("trim() expects String"));
+    };
+    Ok(Value::String(value.trim().to_owned()))
+}
+
+fn builtin_upper(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("upper", 1, args.len())?;
+    let Value::String(value) = &args[0] else {
+        return Err(RuntimeError::new("upper() expects String"));
+    };
+    Ok(Value::String(value.to_uppercase()))
+}
+
+fn builtin_lower(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("lower", 1, args.len())?;
+    let Value::String(value) = &args[0] else {
+        return Err(RuntimeError::new("lower() expects String"));
+    };
+    Ok(Value::String(value.to_lowercase()))
 }
 
 fn builtin_read(args: Vec<Value>) -> RuntimeResult<Value> {
@@ -882,6 +1145,19 @@ fn invalid_binary(left: &Value, op: BinaryOp, right: &Value) -> RuntimeResult<Va
         left.type_name(),
         right.type_name()
     )))
+}
+
+fn is_callable(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::Function(_) | Value::Constructor(_) | Value::Native(_)
+    )
+}
+
+fn is_binding_pattern_name(name: &str) -> bool {
+    name.chars()
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_lowercase())
 }
 
 fn values_equal(left: &Value, right: &Value) -> bool {

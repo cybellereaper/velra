@@ -37,6 +37,7 @@ keyword_kind(text) {
     if text == "in" { return "in" }
     if text == "when" { return "when" }
     if text == "return" { return "return" }
+    if text == "require" { return "require" }
     if text == "object" { return "object" }
     if text == "extend" { return "extend" }
     if text == "shape" { return "shape" }
@@ -104,6 +105,7 @@ lex(source) {
         if step == index {
             ch = chars[index]
             next = if index + 1 < length { chars[index + 1] } else { "" }
+            third = if index + 2 < length { chars[index + 2] } else { "" }
 
             if ch == " " || ch == "\t" || ch == "\r" {
                 index = index + 1
@@ -140,7 +142,11 @@ lex(source) {
                 index = end
             } else {
                 pair = ch + next
-                if pair == "==" || pair == "!=" || pair == "<=" || pair == ">=" || pair == "&&" || pair == "||" || pair == "?." || pair == "?:" || pair == "=>" || pair == "->" {
+                triple = pair + third
+                if triple == "..=" {
+                    push(result, Token(triple, triple))
+                    index = index + 3
+                } else if pair == "==" || pair == "!=" || pair == "<=" || pair == ">=" || pair == "&&" || pair == "||" || pair == "|>" || pair == ".." || pair == "?." || pair == "?:" || pair == "=>" || pair == "->" {
                     push(result, Token(pair, pair))
                     index = index + 2
                 } else {
@@ -292,16 +298,15 @@ parse_params() {
     return output + ")"
 }
 
-parse_program_tail(output) {
-    if at("eof") { return output }
-    next_output = output + " " + parse_statement()
-    if !at("eof") { consume_separators() }
-    return parse_program_tail(next_output)
-}
-
 parse_program() {
     consume_separators()
-    output = parse_program_tail("(program")
+    var output = "(program"
+    for step in range(len(parse_tokens)) {
+        if !at("eof") {
+            output = output + " " + parse_statement()
+            if !at("eof") { consume_separators() }
+        }
+    }
     expect("eof")
     return output + ")"
 }
@@ -311,8 +316,10 @@ parse_statement() {
     if eat("use") { return parse_use() }
     if eat("var") { return parse_var() }
     if eat("return") { return parse_return() }
+    if eat("require") { return parse_require() }
     if eat("for") { return parse_for() }
     if at("if") { return "(expr " + parse_if() + ")" }
+    if at("when") { return "(expr " + parse_when() + ")" }
     if looks_like_data_decl() { return parse_data() }
     if looks_like_function_decl() { return parse_function() }
 
@@ -343,6 +350,13 @@ parse_var() {
 parse_return() {
     if at("sep") || at("}") || at("eof") { return "(return (none))" }
     return "(return (some " + parse_expression() + "))"
+}
+
+parse_require() {
+    condition = parse_expression()
+    args = "(args " + condition
+    if eat(",") { args = args + " " + parse_expression() }
+    return "(expr (call (ident \"assert\") " + args + ")))"
 }
 
 parse_for() {
@@ -412,9 +426,63 @@ parse_if() {
     return "(if " + condition + " " + then_branch + " " + else_branch + ")"
 }
 
+parse_when_patterns(output) {
+    next_output = output + " " + parse_expression()
+    if eat(",") {
+        consume_separators()
+        return parse_when_patterns(next_output)
+    }
+    return next_output + ")"
+}
+
+parse_when_body() {
+    if at("{") { return "(when-block " + parse_block() + ")" }
+    return "(when-expr " + parse_expression() + ")"
+}
+
+parse_when_case() {
+    if eat("else") {
+        expect("=>")
+        return "(case (patterns) (none) " + parse_when_body() + " true)"
+    }
+    patterns = parse_when_patterns("(patterns")
+    var guard = "(none)"
+    if eat("if") { guard = "(some " + parse_expression() + ")" }
+    expect("=>")
+    return "(case " + patterns + " " + guard + " " + parse_when_body() + " false)"
+}
+
+parse_when_cases(output) {
+    if at("}") { return output + ")" }
+    next_output = output + " " + parse_when_case()
+    if !at("}") { consume_separators() }
+    return parse_when_cases(next_output)
+}
+
+parse_when() {
+    expect("when")
+    var subject = "(none)"
+    if !at("{") { subject = "(some " + parse_expression() + ")" }
+    expect("{")
+    consume_separators()
+    cases = parse_when_cases("(cases")
+    expect("}")
+    return "(when " + subject + " " + cases + ")"
+}
+
 binary(left, op, right) => "(binary " + op + " " + left + " " + right + ")"
 
-parse_expression() => parse_elvis()
+parse_expression() => parse_pipeline()
+
+parse_pipeline_tail(expr) {
+    if eat("|>") {
+        callee = parse_elvis()
+        return parse_pipeline_tail("(call " + callee + " (args " + expr + "))")
+    }
+    return expr
+}
+
+parse_pipeline() => parse_pipeline_tail(parse_elvis())
 
 parse_elvis_tail(expr) {
     if eat("?:") { return parse_elvis_tail(binary(expr, "elvis", parse_or())) }
@@ -445,15 +513,30 @@ parse_equality_tail(expr) {
 
 parse_equality() => parse_equality_tail(parse_comparison())
 
+parse_range() {
+    start = parse_additive()
+    if eat("..") {
+        end = parse_additive()
+        assert(!at("..") && !at("..="), "range operators cannot be chained")
+        return "(call (ident \"range\") (args " + start + " " + end + "))"
+    }
+    if eat("..=") {
+        end = parse_additive()
+        assert(!at("..") && !at("..="), "range operators cannot be chained")
+        return "(call (ident \"range_inclusive\") (args " + start + " " + end + "))"
+    }
+    return start
+}
+
 parse_comparison_tail(expr) {
-    if eat("<") { return parse_comparison_tail(binary(expr, "less", parse_additive())) }
-    if eat("<=") { return parse_comparison_tail(binary(expr, "less-equal", parse_additive())) }
-    if eat(">") { return parse_comparison_tail(binary(expr, "greater", parse_additive())) }
-    if eat(">=") { return parse_comparison_tail(binary(expr, "greater-equal", parse_additive())) }
+    if eat("<") { return parse_comparison_tail(binary(expr, "less", parse_range())) }
+    if eat("<=") { return parse_comparison_tail(binary(expr, "less-equal", parse_range())) }
+    if eat(">") { return parse_comparison_tail(binary(expr, "greater", parse_range())) }
+    if eat(">=") { return parse_comparison_tail(binary(expr, "greater-equal", parse_range())) }
     return expr
 }
 
-parse_comparison() => parse_comparison_tail(parse_additive())
+parse_comparison() => parse_comparison_tail(parse_range())
 
 parse_additive_tail(expr) {
     if eat("+") { return parse_additive_tail(binary(expr, "add", parse_multiplicative())) }
@@ -558,6 +641,7 @@ parse_primary() {
         return output + ")"
     }
     if at("if") { return parse_if() }
+    if at("when") { return parse_when() }
     assert(false, "expected expression")
     return "null"
 }

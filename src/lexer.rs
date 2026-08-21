@@ -26,6 +26,7 @@ pub enum TokenKind {
     In,
     When,
     Return,
+    Require,
     Object,
     Extend,
     Shape,
@@ -43,6 +44,9 @@ pub enum TokenKind {
     Or,
     SafeDot,
     Elvis,
+    Range,
+    RangeInclusive,
+    PipeForward,
     Assign,
     Plus,
     Minus,
@@ -298,6 +302,19 @@ impl<'a> Lexer<'a> {
     fn symbol(&mut self) -> Result<Token, LexError> {
         let (start, ch) = self.current().expect("symbol starts at current character");
         let pair = self.peek_char().map(|next| (ch, next));
+        let triple = self
+            .chars
+            .get(self.cursor + 2)
+            .map(|(_, third)| (ch, self.peek_char().unwrap_or_default(), *third));
+
+        if triple == Some(('.', '.', '=')) {
+            self.cursor += 3;
+            return Ok(Token {
+                kind: TokenKind::RangeInclusive,
+                span: Span::new(start, self.byte_after(self.cursor - 1)),
+            });
+        }
+
         let paired = match pair {
             Some(('=', '=')) => Some(TokenKind::Eq),
             Some(('!', '=')) => Some(TokenKind::Neq),
@@ -305,6 +322,8 @@ impl<'a> Lexer<'a> {
             Some(('>', '=')) => Some(TokenKind::Gte),
             Some(('&', '&')) => Some(TokenKind::And),
             Some(('|', '|')) => Some(TokenKind::Or),
+            Some(('|', '>')) => Some(TokenKind::PipeForward),
+            Some(('.', '.')) => Some(TokenKind::Range),
             Some(('?', '.')) => Some(TokenKind::SafeDot),
             Some(('?', ':')) => Some(TokenKind::Elvis),
             Some(('=', '>')) => Some(TokenKind::FatArrow),
@@ -370,6 +389,7 @@ fn keyword(text: &str) -> Option<TokenKind> {
         "in" => TokenKind::In,
         "when" => TokenKind::When,
         "return" => TokenKind::Return,
+        "require" => TokenKind::Require,
         "object" => TokenKind::Object,
         "extend" => TokenKind::Extend,
         "shape" => TokenKind::Shape,
