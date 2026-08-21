@@ -80,6 +80,9 @@ impl Parser {
         if self.eat(&TokenKind::Return) {
             return self.parse_return();
         }
+        if self.eat(&TokenKind::Require) {
+            return self.parse_require();
+        }
         if self.eat(&TokenKind::For) {
             return self.parse_for();
         }
@@ -140,6 +143,17 @@ impl Parser {
         } else {
             Ok(Stmt::Return(Some(self.parse_expression()?)))
         }
+    }
+
+    fn parse_require(&mut self) -> Result<Stmt, ParseError> {
+        let mut args = vec![self.parse_expression()?];
+        if self.eat(&TokenKind::Comma) {
+            args.push(self.parse_expression()?);
+        }
+        Ok(Stmt::Expr(Expr::Call {
+            callee: Box::new(Expr::Ident("assert".into())),
+            args,
+        }))
     }
 
     fn parse_for(&mut self) -> Result<Stmt, ParseError> {
@@ -343,7 +357,19 @@ impl Parser {
     }
 
     fn parse_expression(&mut self) -> Result<Expr, ParseError> {
-        self.parse_elvis()
+        self.parse_pipeline()
+    }
+
+    fn parse_pipeline(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_elvis()?;
+        while self.eat(&TokenKind::PipeForward) {
+            let callee = self.parse_elvis()?;
+            expr = Expr::Call {
+                callee: Box::new(callee),
+                args: vec![expr],
+            };
+        }
+        Ok(expr)
     }
 
     fn parse_elvis(&mut self) -> Result<Expr, ParseError> {
@@ -391,7 +417,7 @@ impl Parser {
     }
 
     fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
-        let mut expr = self.parse_additive()?;
+        let mut expr = self.parse_range()?;
         loop {
             let op = if self.eat(&TokenKind::Lt) {
                 Some(BinaryOp::Less)
@@ -405,10 +431,32 @@ impl Parser {
                 None
             };
             let Some(op) = op else { break };
-            let right = self.parse_additive()?;
+            let right = self.parse_range()?;
             expr = binary(expr, op, right);
         }
         Ok(expr)
+    }
+
+    fn parse_range(&mut self) -> Result<Expr, ParseError> {
+        let start = self.parse_additive()?;
+        let callee = if self.eat(&TokenKind::Range) {
+            Some("range")
+        } else if self.eat(&TokenKind::RangeInclusive) {
+            Some("range_inclusive")
+        } else {
+            None
+        };
+        let Some(callee) = callee else {
+            return Ok(start);
+        };
+        let end = self.parse_additive()?;
+        if self.at(&TokenKind::Range) || self.at(&TokenKind::RangeInclusive) {
+            return Err(self.error("range operators cannot be chained"));
+        }
+        Ok(Expr::Call {
+            callee: Box::new(Expr::Ident(callee.into())),
+            args: vec![start, end],
+        })
     }
 
     fn parse_additive(&mut self) -> Result<Expr, ParseError> {
