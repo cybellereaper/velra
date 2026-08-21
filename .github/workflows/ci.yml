@@ -21,19 +21,12 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
           path = Path('src/parser.rs')
           text = path.read_text()
-          old = '''    fn looks_like_command_call(&self) -> bool {
-              if !self.current().kind.is_identifier() {
-                  return false;
-              }
-              self.tokens
-                  .get(self.cursor + 1)
-                  .is_some_and(|token| can_start_command_argument(&token.kind))
-          }
-          '''
-          new = '''    fn looks_like_command_call(&self) -> bool {
+          pattern = r'''    fn looks_like_command_call\(&self\) -> bool \{.*?\n    \}\n\n    fn take_identifier'''
+          replacement = '''    fn looks_like_command_call(&self) -> bool {
               if !self.current().kind.is_identifier() {
                   return false;
               }
@@ -42,21 +35,13 @@ jobs:
               };
               self.current().span.end < next.span.start && can_start_command_argument(&next.kind)
           }
-          '''
-          if old not in text:
-              raise SystemExit('looks_like_command_call block did not match expected source')
-          text = text.replace(old, new, 1)
 
-          needle = '''    #[test]
-              fn parses_command_style_calls() {
-                  let program = parse_ok("print \\\"hello\\\", 42");
-                  assert!(matches!(
-                      program.statements[0],
-                      Stmt::Expr(Expr::Call { .. })
-                  ));
-              }
-          '''
-          replacement = needle + '''
+          fn take_identifier'''
+          text, count = re.subn(pattern, replacement, text, count=1, flags=re.S)
+          if count != 1:
+              raise SystemExit(f'expected one command-call matcher, replaced {count}')
+
+          test = '''
               #[test]
               fn adjacent_indexing_is_not_a_command_call() {
                   let program = parse_ok("value = [1]\\nvalue[0]");
@@ -66,10 +51,12 @@ jobs:
                   ));
               }
           '''
-          if needle not in text:
-              raise SystemExit('parser test insertion point did not match expected source')
-          path.write_text(text.replace(needle, replacement, 1))
+          if 'fn adjacent_indexing_is_not_a_command_call()' not in text:
+              head, tail = text.rsplit('\n}', 1)
+              text = head + test + '\n}' + tail
+          path.write_text(text)
           PY
+          cargo fmt --all
       - name: Format
         run: cargo fmt --all -- --check
       - name: Check
