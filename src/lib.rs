@@ -1,3 +1,4 @@
+pub mod artifact;
 pub mod ast;
 pub mod lexer;
 pub mod parser;
@@ -10,6 +11,7 @@ pub use runtime::{Interpreter, RuntimeError, Value};
 
 #[derive(Debug)]
 pub enum Error {
+    Artifact(artifact::ArtifactError),
     Lex(lexer::LexError),
     Parse(parser::ParseError),
     Runtime(RuntimeError),
@@ -18,6 +20,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Artifact(error) => error.fmt(f),
             Self::Lex(error) => error.fmt(f),
             Self::Parse(error) => error.fmt(f),
             Self::Runtime(error) => error.fmt(f),
@@ -26,6 +29,12 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+impl From<artifact::ArtifactError> for Error {
+    fn from(value: artifact::ArtifactError) -> Self {
+        Self::Artifact(value)
+    }
+}
 
 impl From<lexer::LexError> for Error {
     fn from(value: lexer::LexError) -> Self {
@@ -48,6 +57,10 @@ impl From<RuntimeError> for Error {
 pub fn check(source: &str) -> Result<ast::Program, Error> {
     let tokens = lexer::lex(source)?;
     Ok(parser::Parser::new(tokens).parse_program()?)
+}
+
+pub fn load_artifact(source: &str) -> Result<ast::Program, Error> {
+    Ok(artifact::decode(source)?)
 }
 
 pub fn run(source: &str) -> Result<Value, Error> {
