@@ -10,6 +10,12 @@ is_letter(ch) => is_lower(ch) || is_upper(ch)
 is_ident_start(ch) => ch == "_" || is_letter(ch)
 is_ident_continue(ch) => is_ident_start(ch) || is_digit(ch)
 
+characters(text) {
+    var output = []
+    for ch in text { push(output, ch) }
+    return output
+}
+
 slice(text, start, end) {
     var output = ""
     for index in range(start, end) {
@@ -90,13 +96,14 @@ scan_string(source, index, value, escaped) {
 
 lex(source) {
     var result = []
+    chars = characters(source)
     var index = 0
-    length = len(source)
+    length = len(chars)
 
     for step in range(length) {
         if step == index {
-            ch = source[index]
-            next = if index + 1 < length { source[index + 1] } else { "" }
+            ch = chars[index]
+            next = if index + 1 < length { chars[index + 1] } else { "" }
 
             if ch == " " || ch == "\t" || ch == "\r" {
                 index = index + 1
@@ -104,24 +111,24 @@ lex(source) {
                 push(result, Token("sep", "\n"))
                 index = index + 1
             } else if ch == "/" && next == "/" {
-                index = scan_comment_end(source, index + 2)
+                index = scan_comment_end(chars, index + 2)
             } else if is_digit(ch) {
-                scan = scan_number(source, index + 1, false)
+                scan = scan_number(chars, index + 1, false)
                 end = scan[0]
                 dot = scan[1]
-                text = slice(source, index, end)
+                text = slice(chars, index, end)
                 kind = if dot { "float" } else { "int" }
                 push(result, Token(kind, text))
                 index = end
             } else if ch == "\"" {
-                scan = scan_string(source, index + 1, "", false)
+                scan = scan_string(chars, index + 1, "", false)
                 value = scan[0]
                 end = scan[1]
                 push(result, Token("string", value))
                 index = end
             } else if is_ident_start(ch) {
-                end = scan_ident_end(source, index + 1)
-                text = slice(source, index, end)
+                end = scan_ident_end(chars, index + 1)
+                text = slice(chars, index, end)
                 keyword = keyword_kind(text)
                 if keyword != null {
                     push(result, Token(keyword, text))
