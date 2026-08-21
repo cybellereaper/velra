@@ -57,14 +57,18 @@ jobs:
           path.write_text(text)
           PY
           cargo fmt --all
-      - name: Format
-        run: cargo fmt --all -- --check
-      - name: Check
-        run: cargo check --all-targets
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-      - name: Test
-        run: cargo test --all-targets
+      - name: Static gates
+        shell: bash
+        run: |
+          cargo fmt --all -- --check
+          cargo check --all-targets
+          cargo clippy --all-targets -- -D warnings
+      - name: Parser regression
+        run: cargo test adjacent_indexing_is_not_a_command_call
+      - name: Bootstrap lexer regression
+        run: cargo test --test self_host compiled_compiler_lexer_accepts_symbols -- --exact --nocapture
+      - name: Minimal stage-one compilation
+        run: cargo test --test self_host compiled_compiler_matches_stage_zero_on_minimal_source -- --exact --nocapture
       - name: Commit verified parser fix
         shell: bash
         run: |
