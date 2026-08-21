@@ -150,7 +150,7 @@ lex(source) {
                     push(result, Token(pair, pair))
                     index = index + 2
                 } else {
-                    valid = ch == "=" || ch == "+" || ch == "-" || ch == "*" || ch == "/" || ch == "%" || ch == "<" || ch == ">" || ch == "!" || ch == "." || ch == "," || ch == ":" || ch == ";" || ch == "?" || ch == "(" || ch == ")" || ch == "{" || ch == "}" || ch == "[" || ch == "]"
+                    valid = ch == "=" || ch == "+" || ch == "-" || ch == "*" || ch == "/" || ch == "%" || ch == "<" || ch == ">" || ch == "!" || ch == "." || ch == "," || ch == ":" || ch == ";" || ch == "?" || ch == "|" || ch == "(" || ch == ")" || ch == "{" || ch == "}" || ch == "[" || ch == "]"
                     assert(valid, "unexpected character in source")
                     if ch == ";" {
                         push(result, Token("sep", ch))
@@ -187,6 +187,77 @@ quote(value) {
         }
     }
     return output + "\""
+}
+
+
+find_interpolation_end(value, index, depth, in_string, escaped) {
+    if index >= len(value) { return -1 }
+    ch = value[index]
+    if in_string {
+        if escaped { return find_interpolation_end(value, index + 1, depth, true, false) }
+        if ch == "\\" { return find_interpolation_end(value, index + 1, depth, true, true) }
+        if ch == "\"" { return find_interpolation_end(value, index + 1, depth, false, false) }
+        return find_interpolation_end(value, index + 1, depth, true, false)
+    }
+    if ch == "\"" { return find_interpolation_end(value, index + 1, depth, true, false) }
+    if ch == "{" { return find_interpolation_end(value, index + 1, depth + 1, false, false) }
+    if ch == "}" {
+        if depth == 1 { return index }
+        return find_interpolation_end(value, index + 1, depth - 1, false, false)
+    }
+    return find_interpolation_end(value, index + 1, depth, false, false)
+}
+
+compile_expression_fragment(source) {
+    old_tokens = parse_tokens
+    old_cursor = parse_cursor
+    parse_tokens = lex(source)
+    parse_cursor = 0
+    expr = parse_expression()
+    consume_separators()
+    expect("eof")
+    parse_tokens = old_tokens
+    parse_cursor = old_cursor
+    return expr
+}
+
+combine_interpolation_parts(parts, index, output) {
+    if index >= len(parts) { return output }
+    return combine_interpolation_parts(parts, index + 1, binary(output, "add", parts[index]))
+}
+
+interpolate_string(value) {
+    var parts = []
+    var literal = ""
+    var index = 0
+    length = len(value)
+    for step in range(length) {
+        if step == index {
+            ch = value[index]
+            next = if index + 1 < length { value[index + 1] } else { "" }
+            if ch == "$" && next == "$" {
+                literal = literal + "$"
+                index = index + 2
+            } else if ch == "$" && next == "{" {
+                if literal != "" {
+                    push(parts, "(string " + quote(literal) + ")")
+                    literal = ""
+                }
+                end = find_interpolation_end(value, index + 2, 1, false, false)
+                assert(end >= 0, "unterminated string interpolation")
+                fragment = slice(value, index + 2, end)
+                assert(trim(fragment) != "", "string interpolation cannot be empty")
+                expr = compile_expression_fragment(fragment)
+                push(parts, "(call (ident \"string\") (args " + expr + "))")
+                index = end + 1
+            } else {
+                literal = literal + ch
+                index = index + 1
+            }
+        }
+    }
+    if literal != "" || len(parts) == 0 { push(parts, "(string " + quote(literal) + ")") }
+    return combine_interpolation_parts(parts, 1, parts[0])
 }
 
 current_kind() {
@@ -359,12 +430,16 @@ parse_require() {
     return "(expr (call (ident \"assert\") " + args + ")))"
 }
 
+prepend_block_statement(body, statement) => "(block " + statement + slice(body, 6, len(body))
+
 parse_for() {
-    name = take_name()
+    pattern = parse_expression()
     expect("in")
     iterable = parse_expression()
-    body = parse_block()
-    return "(for " + quote(name) + " " + iterable + " " + body + ")"
+    parsed_body = parse_block()
+    binding = "(assign " + pattern + " (ident \"$item\"))"
+    body = prepend_block_statement(parsed_body, binding)
+    return "(for \"$item\" " + iterable + " " + body + ")"
 }
 
 parse_function() {
@@ -590,6 +665,7 @@ parse_postfix_tail(expr) {
         expect("]")
         return parse_postfix_tail("(index " + expr + " " + index + ")")
     }
+    if eat("?") { return parse_postfix_tail("(propagate " + expr + ")") }
     return expr
 }
 
@@ -606,6 +682,25 @@ parse_list_tail(output) {
     return next_output
 }
 
+
+parse_lambda_params(output) {
+    name = take_name()
+    next_output = output + " (param " + quote(name) + " (none))"
+    consume_separators()
+    if eat(",") {
+        consume_separators()
+        return parse_lambda_params(next_output)
+    }
+    return next_output + ")"
+}
+
+parse_lambda() {
+    consume_separators()
+    params = parse_lambda_params("(params")
+    expect("|")
+    return "(lambda " + params + " " + parse_expression() + ")"
+}
+
 parse_primary() {
     if at("int") {
         value = current_text()
@@ -620,11 +715,12 @@ parse_primary() {
     if at("string") {
         value = current_text()
         parse_cursor = parse_cursor + 1
-        return "(string " + quote(value) + ")"
+        return interpolate_string(value)
     }
     if eat("true") { return "(bool true)" }
     if eat("false") { return "(bool false)" }
     if eat("null") { return "null" }
+    if eat("|") { return parse_lambda() }
     if at("ident") || at("data-ident") {
         name = take_name()
         return "(ident " + quote(name) + ")"

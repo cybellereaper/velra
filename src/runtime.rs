@@ -537,6 +537,33 @@ impl Interpreter {
                 let index = self.eval_expr(index, env)?;
                 index_value(object, index).map_err(Into::into)
             }
+            Expr::Propagate { expr } => {
+                let value = self.eval_expr(expr, env)?;
+                match value {
+                    Value::Record(record) if record.name == "Ok" || record.name == "Some" => {
+                        record_payload(&record).ok_or_else(|| {
+                            Signal::Runtime(RuntimeError::new(format!(
+                                "{} must contain one payload value",
+                                record.name
+                            )))
+                        })
+                    }
+                    Value::Record(record) if record.name == "Err" || record.name == "None" => {
+                        Err(Signal::Return(Value::Record(record)))
+                    }
+                    value => Err(RuntimeError::new(format!(
+                        "postfix '?' expects Ok/Err or Some/None, got {}",
+                        value.type_name()
+                    ))
+                    .into()),
+                }
+            }
+            Expr::Lambda { params, body } => Ok(Value::Function(Rc::new(UserFunction {
+                name: "<lambda>".into(),
+                params: params.clone(),
+                body: FunctionBody::Expr((**body).clone()),
+                closure: env,
+            }))),
             Expr::If {
                 condition,
                 then_branch,
@@ -761,6 +788,13 @@ fn install_builtins(env: &EnvRef) {
         ("trim", builtin_trim as NativeFn),
         ("upper", builtin_upper as NativeFn),
         ("lower", builtin_lower as NativeFn),
+        ("string", builtin_string as NativeFn),
+        ("is_ok", builtin_is_ok as NativeFn),
+        ("is_err", builtin_is_err as NativeFn),
+        ("is_some", builtin_is_some as NativeFn),
+        ("is_none", builtin_is_none as NativeFn),
+        ("unwrap", builtin_unwrap as NativeFn),
+        ("unwrap_or", builtin_unwrap_or as NativeFn),
         ("read", builtin_read as NativeFn),
         ("write", builtin_write as NativeFn),
     ] {
@@ -772,6 +806,43 @@ fn install_builtins(env: &EnvRef) {
             },
         );
     }
+
+    install_variant(env, "Ok", &["value"]);
+    install_variant(env, "Err", &["error"]);
+    install_variant(env, "Some", &["value"]);
+    install_variant(env, "None", &[]);
+}
+
+fn install_variant(env: &EnvRef, name: &str, fields: &[&str]) {
+    let params = fields
+        .iter()
+        .map(|field| Param {
+            name: (*field).to_owned(),
+            type_name: None,
+        })
+        .collect();
+    let data = DataType {
+        name: name.to_owned(),
+        params,
+        computed: Vec::new(),
+        closure: Rc::clone(env),
+    };
+    env.borrow_mut().values.insert(
+        name.to_owned(),
+        Binding {
+            value: Value::Constructor(Rc::new(data)),
+            mutable: false,
+        },
+    );
+}
+
+fn record_payload(record: &Record) -> Option<Value> {
+    let field = record.positional_fields.first()?;
+    record.fields.get(field).cloned()
+}
+
+fn is_variant(value: &Value, name: &str) -> bool {
+    matches!(value, Value::Record(record) if record.name == name)
 }
 
 fn builtin_print(args: Vec<Value>) -> RuntimeResult<Value> {
@@ -959,6 +1030,75 @@ fn builtin_lower(args: Vec<Value>) -> RuntimeResult<Value> {
         return Err(RuntimeError::new("lower() expects String"));
     };
     Ok(Value::String(value.to_lowercase()))
+}
+
+fn builtin_string(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("string", 1, args.len())?;
+    Ok(Value::String(args[0].to_string()))
+}
+
+fn builtin_is_ok(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("is_ok", 1, args.len())?;
+    Ok(Value::Bool(is_variant(&args[0], "Ok")))
+}
+
+fn builtin_is_err(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("is_err", 1, args.len())?;
+    Ok(Value::Bool(is_variant(&args[0], "Err")))
+}
+
+fn builtin_is_some(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("is_some", 1, args.len())?;
+    Ok(Value::Bool(is_variant(&args[0], "Some")))
+}
+
+fn builtin_is_none(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("is_none", 1, args.len())?;
+    Ok(Value::Bool(is_variant(&args[0], "None")))
+}
+
+fn builtin_unwrap(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("unwrap", 1, args.len())?;
+    match &args[0] {
+        Value::Record(record) if record.name == "Ok" || record.name == "Some" => {
+            record_payload(record).ok_or_else(|| {
+                RuntimeError::new(format!("{} must contain one payload value", record.name))
+            })
+        }
+        Value::Record(record) if record.name == "Err" => {
+            let detail = record_payload(record)
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown error".into());
+            Err(RuntimeError::new(format!(
+                "unwrap() called on Err: {detail}"
+            )))
+        }
+        Value::Record(record) if record.name == "None" => {
+            Err(RuntimeError::new("unwrap() called on None"))
+        }
+        value => Err(RuntimeError::new(format!(
+            "unwrap() expects Ok/Err or Some/None, got {}",
+            value.type_name()
+        ))),
+    }
+}
+
+fn builtin_unwrap_or(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("unwrap_or", 2, args.len())?;
+    match &args[0] {
+        Value::Record(record) if record.name == "Ok" || record.name == "Some" => {
+            record_payload(record).ok_or_else(|| {
+                RuntimeError::new(format!("{} must contain one payload value", record.name))
+            })
+        }
+        Value::Record(record) if record.name == "Err" || record.name == "None" => {
+            Ok(args[1].clone())
+        }
+        value => Err(RuntimeError::new(format!(
+            "unwrap_or() expects Ok/Err or Some/None, got {}",
+            value.type_name()
+        ))),
+    }
 }
 
 fn builtin_read(args: Vec<Value>) -> RuntimeResult<Value> {

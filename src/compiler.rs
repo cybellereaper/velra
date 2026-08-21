@@ -204,6 +204,18 @@ fn encode_expr(output: &mut String, expr: &Expr) {
             encode_expr(output, index);
             output.push(')');
         }
+        Expr::Propagate { expr } => {
+            output.push_str("(propagate ");
+            encode_expr(output, expr);
+            output.push(')');
+        }
+        Expr::Lambda { params, body } => {
+            output.push_str("(lambda ");
+            encode_params(output, params);
+            output.push(' ');
+            encode_expr(output, body);
+            output.push(')');
+        }
         Expr::If {
             condition,
             then_branch,

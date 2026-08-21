@@ -391,6 +391,19 @@ fn decode_expr(form: &Form) -> Result<Expr, ArtifactError> {
                 index: Box::new(decode_expr(&list[2])?),
             })
         }
+        "propagate" => {
+            expect_len(list, 2, "propagate")?;
+            Ok(Expr::Propagate {
+                expr: Box::new(decode_expr(&list[1])?),
+            })
+        }
+        "lambda" => {
+            expect_len(list, 3, "lambda")?;
+            Ok(Expr::Lambda {
+                params: decode_params(&list[1])?,
+                body: Box::new(decode_expr(&list[2])?),
+            })
+        }
         "if" => {
             expect_len(list, 4, "if")?;
             Ok(Expr::If {

@@ -107,6 +107,13 @@ pub enum Expr {
         object: Box<Expr>,
         index: Box<Expr>,
     },
+    Propagate {
+        expr: Box<Expr>,
+    },
+    Lambda {
+        params: Vec<Param>,
+        body: Box<Expr>,
+    },
     If {
         condition: Box<Expr>,
         then_branch: Block,
