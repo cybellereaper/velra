@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::{self, Write};
 use std::process::ExitCode;
-use velra::{check, compile, load_artifact, Error, Interpreter, Value};
+use velra::{load_artifact, Error, Interpreter, SelfHostedCompiler, Value};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -74,22 +74,36 @@ fn run_cli() -> Result<(), String> {
     }
 }
 
+fn self_hosted_compiler() -> Result<SelfHostedCompiler, String> {
+    SelfHostedCompiler::new()
+        .map_err(|error| format!("failed to initialize embedded Velra compiler: {error}"))
+}
+
 fn run_file(path: &str) -> Result<(), String> {
     let source = read_source(path)?;
-    let program = check(&source).map_err(|error| render_error(path, &source, &error))?;
+    let mut compiler = self_hosted_compiler()?;
+    let program = compiler
+        .check(&source)
+        .map_err(|error| render_error(path, &source, &error))?;
     execute(path, program)
 }
 
 fn check_file(path: &str) -> Result<(), String> {
     let source = read_source(path)?;
-    check(&source).map_err(|error| render_error(path, &source, &error))?;
+    let mut compiler = self_hosted_compiler()?;
+    compiler
+        .check(&source)
+        .map_err(|error| render_error(path, &source, &error))?;
     println!("{path}: ok");
     Ok(())
 }
 
 fn compile_file(input: &str, output: &str) -> Result<(), String> {
     let source = read_source(input)?;
-    let artifact = compile(&source).map_err(|error| render_error(input, &source, &error))?;
+    let mut compiler = self_hosted_compiler()?;
+    let artifact = compiler
+        .compile(&source)
+        .map_err(|error| render_error(input, &source, &error))?;
     fs::write(output, artifact).map_err(|error| format!("failed to write '{output}': {error}"))
 }
 
@@ -109,6 +123,7 @@ fn execute(path: &str, program: velra::ast::Program) -> Result<(), String> {
 
 fn repl() -> Result<(), String> {
     let stdin = io::stdin();
+    let mut compiler = self_hosted_compiler()?;
     let mut interpreter = Interpreter::new();
     let mut line = String::new();
 
@@ -130,7 +145,7 @@ fn repl() -> Result<(), String> {
             continue;
         }
 
-        match check(&line) {
+        match compiler.check(&line) {
             Ok(program) => match interpreter.eval_program(&program) {
                 Ok(Value::Null) => {}
                 Ok(value) => println!("{value}"),
@@ -159,7 +174,7 @@ fn render_error(path: &str, source: &str, error: &Error) -> String {
         Error::Artifact(error) => (error.message.as_str(), error.offset),
         Error::Lex(error) => (error.message.as_str(), error.span.start),
         Error::Parse(error) => (error.message.as_str(), error.offset),
-        Error::Runtime(error) => return format!("{path}: runtime error: {error}"),
+        Error::Runtime(error) => return format!("{path}: compile/runtime error: {error}"),
     };
     let (line, column) = line_column(source, offset);
     format!("{path}:{line}:{column}: {message}")
@@ -179,6 +194,6 @@ fn print_help() {
     println!(
         "Velra {VERSION}\n\n\
 Usage:\n  velra <file.vel>\n  velra run <file.vel>\n  velra check <file.vel>\n  velra compile <input.vel> <output.velc>\n  velra exec <file.velc>\n  velra repl\n\n\
-Commands:\n  run      Execute a Velra source file\n  check    Lex and parse without executing\n  compile  Compile source to a Velra artifact\n  exec     Execute a compiled Velra artifact\n  repl     Start an interactive session\n"
+Commands:\n  run      Compile with the embedded Velra compiler and execute source\n  check    Compile with the embedded Velra compiler without executing\n  compile  Compile source to a Velra artifact using the Velra compiler\n  exec     Execute a compiled Velra artifact\n  repl     Start an interactive session backed by the Velra compiler\n"
     );
 }
