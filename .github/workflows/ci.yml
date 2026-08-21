@@ -6,7 +6,7 @@ on:
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   rust:
@@ -16,18 +16,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Format working tree
-        run: cargo fmt --all
-      - name: Commit bootstrap formatting
-        if: github.event_name == 'push' && github.ref == 'refs/heads/rust-self-hosted-bootstrap'
-        run: |
-          if ! git diff --quiet; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add -- src tests
-            git commit -m "Format Rust sources"
-            git push origin HEAD:rust-self-hosted-bootstrap
-          fi
+      - name: Format
+        run: cargo fmt --all -- --check
       - name: Check
         run: cargo check --all-targets
       - name: Clippy
