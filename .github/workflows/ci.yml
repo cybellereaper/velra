@@ -6,7 +6,7 @@ on:
   pull_request:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   rust:
@@ -18,17 +18,19 @@ jobs:
           components: rustfmt, clippy
       - name: Format working tree
         run: cargo fmt --all
+      - name: Commit bootstrap formatting
+        if: github.event_name == 'push' && github.ref == 'refs/heads/rust-self-hosted-bootstrap'
+        run: |
+          if ! git diff --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -- src tests
+            git commit -m "Format Rust sources"
+            git push origin HEAD:rust-self-hosted-bootstrap
+          fi
       - name: Check
         run: cargo check --all-targets
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
         run: cargo test --all-targets
-      - name: Capture formatted sources
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: rustfmt-output
-          path: |
-            src
-            tests
