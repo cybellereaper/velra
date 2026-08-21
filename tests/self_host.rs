@@ -10,11 +10,17 @@ fn compiler_program() -> (String, Program) {
     (source, program)
 }
 
+fn call(name: &str, argument: &str) -> Program {
+    Program {
+        statements: vec![Stmt::Expr(Expr::Call {
+            callee: Box::new(Expr::Ident(name.into())),
+            args: vec![Expr::String(argument.into())],
+        })],
+    }
+}
+
 fn invoke(mut program: Program, name: &str, argument: &str) -> Value {
-    program.statements.push(Stmt::Expr(Expr::Call {
-        callee: Box::new(Expr::Ident(name.into())),
-        args: vec![Expr::String(argument.into())],
-    }));
+    program.statements.extend(call(name, argument).statements);
     Interpreter::new().eval_program(&program).unwrap()
 }
 
@@ -54,6 +60,19 @@ fn compiled_compiler_helpers_run() {
         Value::List(_)
     ));
     assert!(matches!(invoke(compiler, "lex", "x"), Value::List(_)));
+}
+
+#[test]
+fn compiled_compiler_lexer_accepts_each_source_line() {
+    let (source, compiler) = compiler_program();
+    let mut interpreter = Interpreter::new();
+    interpreter.eval_program(&compiler).unwrap();
+
+    for (index, line) in source.lines().enumerate() {
+        if let Err(error) = interpreter.eval_program(&call("lex", line)) {
+            panic!("lexer failed on line {} ({line:?}): {error}", index + 1);
+        }
+    }
 }
 
 #[test]
