@@ -1,6 +1,6 @@
 use crate::ast::{
-    BinaryOp, Block, DataDecl, ElseBranch, Expr, FunctionBody, FunctionDecl, Param, Program,
-    Stmt, UnaryOp, WhenBody, WhenCase,
+    BinaryOp, Block, DataDecl, ElseBranch, Expr, FunctionBody, FunctionDecl, Param, Program, Stmt,
+    UnaryOp, WhenBody, WhenCase,
 };
 use crate::lexer::{lex, LexError, Token, TokenKind};
 use std::fmt;
@@ -62,7 +62,10 @@ impl Parser {
                 return Err(self.error("duplicate 'pub' modifier"));
             }
             let statement = self.parse_statement()?;
-            if !matches!(statement, Stmt::Function(_) | Stmt::Var { .. } | Stmt::Assign { .. } | Stmt::Data(_)) {
+            if !matches!(
+                statement,
+                Stmt::Function(_) | Stmt::Var { .. } | Stmt::Assign { .. } | Stmt::Data(_)
+            ) {
                 return Err(self.error("'pub' is only valid on declarations"));
             }
             return Ok(Stmt::Pub(Box::new(statement)));
@@ -572,7 +575,10 @@ impl Parser {
     fn looks_like_function_decl(&self) -> bool {
         matches!(self.current().kind, TokenKind::Ident(_))
             && self.after_parameter_clause().is_some_and(|index| {
-                matches!(self.tokens[index].kind, TokenKind::FatArrow | TokenKind::LBrace)
+                matches!(
+                    self.tokens[index].kind,
+                    TokenKind::FatArrow | TokenKind::LBrace
+                )
             })
     }
 
@@ -750,7 +756,10 @@ mod tests {
     use super::*;
 
     fn parse_ok(source: &str) -> Program {
-        Parser::from_source(source).unwrap().parse_program().unwrap()
+        Parser::from_source(source)
+            .unwrap()
+            .parse_program()
+            .unwrap()
     }
 
     #[test]
@@ -779,6 +788,9 @@ when user?.label {
     #[test]
     fn parses_command_style_calls() {
         let program = parse_ok("print \"hello\", 42");
-        assert!(matches!(program.statements[0], Stmt::Expr(Expr::Call { .. })));
+        assert!(matches!(
+            program.statements[0],
+            Stmt::Expr(Expr::Call { .. })
+        ));
     }
 }

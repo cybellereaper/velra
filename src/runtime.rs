@@ -516,7 +516,9 @@ impl Interpreter {
                     fields,
                 })))
             }
-            value => Err(RuntimeError::new(format!("{} is not callable", value.type_name())).into()),
+            value => {
+                Err(RuntimeError::new(format!("{} is not callable", value.type_name())).into())
+            }
         }
     }
 }
@@ -968,7 +970,10 @@ mod tests {
 
     #[test]
     fn immutable_by_default_and_var_is_mutable() {
-        assert!(eval("x = 1\nx = 2").unwrap_err().message.contains("immutable"));
+        assert!(eval("x = 1\nx = 2")
+            .unwrap_err()
+            .message
+            .contains("immutable"));
         assert_eq!(eval("var x = 1\nx = 2\nx").unwrap().to_string(), "2");
     }
 

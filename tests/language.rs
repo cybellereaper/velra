@@ -40,7 +40,10 @@ fn rejects_reserved_features_cleanly() {
 
 #[test]
 fn explicit_types_are_runtime_contracts() {
-    assert_eq!(run("var value: Number = 1\nvalue").unwrap().to_string(), "1");
+    assert_eq!(
+        run("var value: Number = 1\nvalue").unwrap().to_string(),
+        "1"
+    );
     let error = run("var value: Int = \"wrong\"").unwrap_err().to_string();
     assert!(error.contains("expects Int"));
 }
