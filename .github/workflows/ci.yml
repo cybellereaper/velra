@@ -1,108 +1,26 @@
 name: CI
 
 on:
+  push:
+    branches: [main, rust-self-hosted-bootstrap]
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: self-hosted-compiler
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Apply parser adjacency fix
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          path = Path('src/parser.rs')
-          text = path.read_text()
-          pattern = r'''    fn looks_like_command_call\(&self\) -> bool \{.*?\n    \}\n\n    fn take_identifier'''
-          replacement = '''    fn looks_like_command_call(&self) -> bool {
-              if !self.current().kind.is_identifier() {
-                  return false;
-              }
-              let Some(next) = self.tokens.get(self.cursor + 1) else {
-                  return false;
-              };
-              self.current().span.end < next.span.start && can_start_command_argument(&next.kind)
-          }
-
-          fn take_identifier'''
-          text, count = re.subn(pattern, replacement, text, count=1, flags=re.S)
-          if count != 1:
-              raise SystemExit(f'expected one command-call matcher, replaced {count}')
-
-          test = '''
-              #[test]
-              fn adjacent_indexing_is_not_a_command_call() {
-                  let program = parse_ok("value = [1]\\nvalue[0]");
-                  assert!(matches!(
-                      program.statements[1],
-                      Stmt::Expr(Expr::Index { .. })
-                  ));
-              }
-          '''
-          if 'fn adjacent_indexing_is_not_a_command_call()' not in text:
-              head, tail = text.rsplit('\n}', 1)
-              text = head + test + '\n}' + tail
-          path.write_text(text)
-          PY
-          cargo fmt --all
-      - name: Static gates
-        shell: bash
-        run: |
-          cargo fmt --all -- --check
-          cargo check --all-targets
-          cargo clippy --all-targets -- -D warnings
-      - name: Parser regression
-        run: cargo test adjacent_indexing_is_not_a_command_call
-      - name: Bootstrap lexer regression
-        run: cargo test --test self_host compiled_compiler_lexer_accepts_symbols -- --exact --nocapture
-      - name: Minimal stage-one compilation
-        run: cargo test --test self_host compiled_compiler_matches_stage_zero_on_minimal_source -- --exact --nocapture
-      - name: Commit verified parser fix
-        shell: bash
-        run: |
-          rm -f .github/workflows/selfhost-parser-fix.yml
-          cat > .github/workflows/ci.yml <<'EOF'
-          name: CI
-
-          on:
-            push:
-              branches: [main, rust-self-hosted-bootstrap]
-            pull_request:
-
-          permissions:
-            contents: read
-
-          jobs:
-            rust:
-              runs-on: ubuntu-latest
-              steps:
-                - uses: actions/checkout@v4
-                - uses: dtolnay/rust-toolchain@stable
-                  with:
-                    components: rustfmt, clippy
-                - name: Format
-                  run: cargo fmt --all -- --check
-                - name: Check
-                  run: cargo check --all-targets
-                - name: Clippy
-                  run: cargo clippy --all-targets -- -D warnings
-                - name: Test
-                  run: cargo test --all-targets
-          EOF
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add -- src/parser.rs .github/workflows/ci.yml .github/workflows/selfhost-parser-fix.yml
-          git commit -m "fix: disambiguate command calls from postfix indexing"
-          git push origin HEAD:self-hosted-compiler
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Check
+        run: cargo check --all-targets
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --all-targets

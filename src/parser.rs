@@ -636,9 +636,10 @@ impl Parser {
         if !self.current().kind.is_identifier() {
             return false;
         }
-        self.tokens
-            .get(self.cursor + 1)
-            .is_some_and(|token| can_start_command_argument(&token.kind))
+        let Some(next) = self.tokens.get(self.cursor + 1) else {
+            return false;
+        };
+        self.current().span.end < next.span.start && can_start_command_argument(&next.kind)
     }
 
     fn take_identifier(&mut self) -> Result<String, ParseError> {
@@ -791,6 +792,14 @@ when user?.label {
         assert!(matches!(
             program.statements[0],
             Stmt::Expr(Expr::Call { .. })
+        ));
+    }
+    #[test]
+    fn adjacent_indexing_is_not_a_command_call() {
+        let program = parse_ok("value = [1]\nvalue[0]");
+        assert!(matches!(
+            program.statements[1],
+            Stmt::Expr(Expr::Index { .. })
         ));
     }
 }
