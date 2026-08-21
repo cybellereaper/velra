@@ -3,13 +3,23 @@ use velra::{
     compile, load_artifact, Interpreter, Value,
 };
 
-fn invoke_compiler(mut program: Program, source: &str) -> String {
-    program.statements.push(Stmt::Expr(Expr::Call {
-        callee: Box::new(Expr::Ident("compile".into())),
-        args: vec![Expr::String(source.into())],
-    }));
+fn compiler_program() -> (String, Program) {
+    let source = std::fs::read_to_string("compiler/main.vel").unwrap();
+    let artifact = compile(&source).unwrap();
+    let program = load_artifact(&artifact).unwrap();
+    (source, program)
+}
 
-    match Interpreter::new().eval_program(&program).unwrap() {
+fn invoke(mut program: Program, name: &str, argument: &str) -> Value {
+    program.statements.push(Stmt::Expr(Expr::Call {
+        callee: Box::new(Expr::Ident(name.into())),
+        args: vec![Expr::String(argument.into())],
+    }));
+    Interpreter::new().eval_program(&program).unwrap()
+}
+
+fn invoke_compiler(program: Program, source: &str) -> String {
+    match invoke(program, "compile", source) {
         Value::String(artifact) => artifact,
         value => panic!("compiler returned {}, expected String", value.type_name()),
     }
@@ -29,11 +39,24 @@ fn compiled_artifacts_execute() {
 }
 
 #[test]
-fn compiler_reproduces_its_stage_zero_artifact() {
-    let source = std::fs::read_to_string("compiler/main.vel").unwrap();
-    let stage_one = compile(&source).unwrap();
-    let compiler = load_artifact(&stage_one).unwrap();
-    let stage_two = invoke_compiler(compiler, &source);
+fn compiled_compiler_lexes_its_source() {
+    let (source, compiler) = compiler_program();
+    assert!(matches!(invoke(compiler, "lex", &source), Value::List(_)));
+}
 
+#[test]
+fn compiled_compiler_matches_stage_zero_on_minimal_source() {
+    let (_, compiler) = compiler_program();
+    let source = "answer = 40 + 2\nanswer";
+    let stage_zero = compile(source).unwrap();
+    let stage_one = invoke_compiler(compiler, source);
+    assert_eq!(stage_one, stage_zero);
+}
+
+#[test]
+fn compiler_reproduces_its_stage_zero_artifact() {
+    let (source, compiler) = compiler_program();
+    let stage_one = compile(&source).unwrap();
+    let stage_two = invoke_compiler(compiler, &source);
     assert_eq!(stage_two, stage_one);
 }
