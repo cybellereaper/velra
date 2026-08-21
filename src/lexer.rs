@@ -165,7 +165,10 @@ impl<'a> Lexer<'a> {
 
     fn number(&mut self) -> Result<Token, LexError> {
         let start_cursor = self.cursor;
-        let start = self.current().expect("number starts at current character").0;
+        let start = self
+            .current()
+            .expect("number starts at current character")
+            .0;
 
         while self.current().is_some_and(|(_, ch)| ch.is_ascii_digit()) {
             self.cursor += 1;
@@ -208,7 +211,10 @@ impl<'a> Lexer<'a> {
     }
 
     fn string(&mut self) -> Result<Token, LexError> {
-        let start = self.current().expect("string starts at current character").0;
+        let start = self
+            .current()
+            .expect("string starts at current character")
+            .0;
         self.cursor += 1;
         let mut value = String::new();
 
@@ -262,8 +268,14 @@ impl<'a> Lexer<'a> {
     }
 
     fn identifier(&mut self) -> Token {
-        let start = self.current().expect("identifier starts at current character").0;
-        let first = self.current().expect("identifier starts at current character").1;
+        let start = self
+            .current()
+            .expect("identifier starts at current character")
+            .0;
+        let first = self
+            .current()
+            .expect("identifier starts at current character")
+            .1;
         self.cursor += 1;
         while self.current().is_some_and(|(_, ch)| is_ident_continue(ch)) {
             self.cursor += 1;
@@ -392,7 +404,10 @@ mod tests {
     fn keeps_newlines_but_skips_comments() {
         let tokens = lex("a = 1 // comment\nb = 2").unwrap();
         assert_eq!(
-            tokens.iter().filter(|token| token.kind == TokenKind::Newline).count(),
+            tokens
+                .iter()
+                .filter(|token| token.kind == TokenKind::Newline)
+                .count(),
             1
         );
     }
