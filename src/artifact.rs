@@ -212,6 +212,21 @@ fn decode_stmt(form: &Form) -> Result<Stmt, ArtifactError> {
             expect_len(list, 2, "return")?;
             Ok(Stmt::Return(decode_optional_expr(&list[1])?))
         }
+        "while" => {
+            expect_len(list, 3, "while")?;
+            Ok(Stmt::While {
+                condition: decode_expr(&list[1])?,
+                body: decode_block(&list[2])?,
+            })
+        }
+        "break" => {
+            expect_len(list, 1, "break")?;
+            Ok(Stmt::Break)
+        }
+        "continue" => {
+            expect_len(list, 1, "continue")?;
+            Ok(Stmt::Continue)
+        }
         "for" => {
             expect_len(list, 4, "for")?;
             Ok(Stmt::For {

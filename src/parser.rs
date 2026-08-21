@@ -83,6 +83,15 @@ impl Parser {
         if self.eat(&TokenKind::Require) {
             return self.parse_require();
         }
+        if self.eat(&TokenKind::While) {
+            return self.parse_while();
+        }
+        if self.eat(&TokenKind::Break) {
+            return Ok(Stmt::Break);
+        }
+        if self.eat(&TokenKind::Continue) {
+            return Ok(Stmt::Continue);
+        }
         if self.eat(&TokenKind::For) {
             return self.parse_for();
         }
@@ -107,6 +116,35 @@ impl Parser {
             let value = self.parse_expression()?;
             return Ok(Stmt::Assign { target, value });
         }
+
+        let compound = if self.eat(&TokenKind::PlusAssign) {
+            Some(BinaryOp::Add)
+        } else if self.eat(&TokenKind::MinusAssign) {
+            Some(BinaryOp::Subtract)
+        } else if self.eat(&TokenKind::StarAssign) {
+            Some(BinaryOp::Multiply)
+        } else if self.eat(&TokenKind::SlashAssign) {
+            Some(BinaryOp::Divide)
+        } else if self.eat(&TokenKind::PercentAssign) {
+            Some(BinaryOp::Remainder)
+        } else {
+            None
+        };
+
+        if let Some(op) = compound {
+            if !matches!(target, Expr::Ident(_)) {
+                return Err(
+                    self.error("compound assignment currently requires an identifier target")
+                );
+            }
+            let value = self.parse_expression()?;
+            let read_target = target.clone();
+            return Ok(Stmt::Assign {
+                target,
+                value: binary(read_target, op, value),
+            });
+        }
+
         Ok(Stmt::Expr(target))
     }
 
@@ -156,8 +194,14 @@ impl Parser {
         }))
     }
 
+    fn parse_while(&mut self) -> Result<Stmt, ParseError> {
+        let condition = self.parse_expression()?;
+        let body = self.parse_block()?;
+        Ok(Stmt::While { condition, body })
+    }
+
     fn parse_for(&mut self) -> Result<Stmt, ParseError> {
-        let pattern = self.parse_expression()?;
+        let pattern = self.parse_postfix()?;
         self.expect(&TokenKind::In, "expected 'in' after loop pattern")?;
         let iterable = self.parse_expression()?;
         let mut body = self.parse_block()?;
@@ -426,6 +470,15 @@ impl Parser {
     fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_range()?;
         loop {
+            if self.eat(&TokenKind::In) {
+                let right = self.parse_range()?;
+                expr = Expr::Call {
+                    callee: Box::new(Expr::Ident("contains".into())),
+                    args: vec![right, expr],
+                };
+                continue;
+            }
+
             let op = if self.eat(&TokenKind::Lt) {
                 Some(BinaryOp::Less)
             } else if self.eat(&TokenKind::Lte) {
@@ -554,12 +607,35 @@ impl Parser {
                     safe: true,
                 };
             } else if self.eat(&TokenKind::LBracket) {
-                let index = self.parse_expression()?;
-                self.expect(&TokenKind::RBracket, "expected ']' after index")?;
-                expr = Expr::Index {
-                    object: Box::new(expr),
-                    index: Box::new(index),
-                };
+                if self.index_contains_range() {
+                    let start = self.parse_additive()?;
+                    let inclusive = if self.eat(&TokenKind::RangeInclusive) {
+                        true
+                    } else {
+                        self.expect(&TokenKind::Range, "expected '..' in slice")?;
+                        false
+                    };
+                    let end = self.parse_additive()?;
+                    self.expect(&TokenKind::RBracket, "expected ']' after slice")?;
+                    expr = Expr::Call {
+                        callee: Box::new(Expr::Ident(
+                            if inclusive {
+                                "slice_inclusive"
+                            } else {
+                                "slice"
+                            }
+                            .into(),
+                        )),
+                        args: vec![expr, start, end],
+                    };
+                } else {
+                    let index = self.parse_expression()?;
+                    self.expect(&TokenKind::RBracket, "expected ']' after index")?;
+                    expr = Expr::Index {
+                        object: Box::new(expr),
+                        index: Box::new(index),
+                    };
+                }
             } else if self.eat(&TokenKind::Question) {
                 expr = Expr::Propagate {
                     expr: Box::new(expr),
@@ -652,6 +728,35 @@ impl Parser {
         }
         self.expect(&TokenKind::RBracket, "expected ']' after list")?;
         Ok(Expr::List(items))
+    }
+
+    fn index_contains_range(&self) -> bool {
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+        let mut brace_depth = 0usize;
+
+        for token in &self.tokens[self.cursor..] {
+            match token.kind {
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket
+                    if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 =>
+                {
+                    return false;
+                }
+                TokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                TokenKind::LBrace => brace_depth += 1,
+                TokenKind::RBrace => brace_depth = brace_depth.saturating_sub(1),
+                TokenKind::Range | TokenKind::RangeInclusive
+                    if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 =>
+                {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     fn looks_like_function_decl(&self) -> bool {

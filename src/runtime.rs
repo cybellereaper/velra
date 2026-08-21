@@ -41,6 +41,7 @@ pub enum Value {
     Float(f64),
     String(String),
     List(Rc<RefCell<Vec<Value>>>),
+    Cursor(Rc<RefCell<CursorState>>),
     Record(Rc<Record>),
     Function(Rc<UserFunction>),
     Constructor(Rc<DataType>),
@@ -56,6 +57,7 @@ impl Value {
             Self::Float(_) => "Float",
             Self::String(_) => "String",
             Self::List(_) => "List",
+            Self::Cursor(_) => "Cursor",
             Self::Record(record) => &record.name,
             Self::Function(_) => "Function",
             Self::Constructor(_) => "Type",
@@ -83,6 +85,7 @@ impl fmt::Debug for Value {
             Self::Float(value) => f.debug_tuple("Float").field(value).finish(),
             Self::String(value) => f.debug_tuple("String").field(value).finish(),
             Self::List(values) => f.debug_tuple("List").field(&*values.borrow()).finish(),
+            Self::Cursor(cursor) => f.debug_tuple("Cursor").field(&*cursor.borrow()).finish(),
             Self::Record(record) => f.debug_tuple("Record").field(record).finish(),
             Self::Function(function) => f.debug_tuple("Function").field(&function.name).finish(),
             Self::Constructor(data) => f.debug_tuple("Constructor").field(&data.name).finish(),
@@ -109,6 +112,10 @@ impl fmt::Display for Value {
                 }
                 f.write_str("]")
             }
+            Self::Cursor(cursor) => {
+                let cursor = cursor.borrow();
+                write!(f, "<cursor {}/{}>", cursor.position, cursor.values.len())
+            }
             Self::Record(record) => {
                 write!(f, "{}(", record.name)?;
                 for (index, (name, value)) in record.fields.iter().enumerate() {
@@ -124,6 +131,12 @@ impl fmt::Display for Value {
             Self::Native(function) => write!(f, "<native {}>", function.name),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct CursorState {
+    values: Vec<Value>,
+    position: usize,
 }
 
 #[derive(Debug)]
@@ -180,6 +193,8 @@ impl Environment {
 enum Signal {
     Runtime(RuntimeError),
     Return(Value),
+    Break,
+    Continue,
 }
 
 type EvalResult<T> = Result<T, Signal>;
@@ -212,6 +227,8 @@ impl Interpreter {
             Ok(value) => Ok(value),
             Err(Signal::Runtime(error)) => Err(error),
             Err(Signal::Return(_)) => Err(RuntimeError::new("'return' used outside a function")),
+            Err(Signal::Break) => Err(RuntimeError::new("'break' used outside a loop")),
+            Err(Signal::Continue) => Err(RuntimeError::new("'continue' used outside a loop")),
         }
     }
 
@@ -254,6 +271,24 @@ impl Interpreter {
                 };
                 Err(Signal::Return(value))
             }
+            Stmt::While { condition, body } => {
+                let mut last = Value::Null;
+                loop {
+                    let condition = self.eval_expr(condition, Rc::clone(&env))?;
+                    if !condition.expect_bool("while condition")? {
+                        break;
+                    }
+                    match self.eval_block(body, Rc::clone(&env)) {
+                        Ok(value) => last = value,
+                        Err(Signal::Break) => break,
+                        Err(Signal::Continue) => continue,
+                        Err(signal) => return Err(signal),
+                    }
+                }
+                Ok(last)
+            }
+            Stmt::Break => Err(Signal::Break),
+            Stmt::Continue => Err(Signal::Continue),
             Stmt::For {
                 name,
                 iterable,
@@ -265,7 +300,12 @@ impl Interpreter {
                 for value in values {
                     let iteration_env = Environment::child(&env);
                     define(&iteration_env, name, value, false)?;
-                    last = self.eval_block(body, iteration_env)?;
+                    match self.eval_block(body, iteration_env) {
+                        Ok(value) => last = value,
+                        Err(Signal::Break) => break,
+                        Err(Signal::Continue) => continue,
+                        Err(signal) => return Err(signal),
+                    }
                 }
                 Ok(last)
             }
@@ -685,6 +725,12 @@ impl Interpreter {
                 };
                 match result {
                     Err(Signal::Return(value)) => Ok(value),
+                    Err(Signal::Break) => {
+                        Err(RuntimeError::new("'break' used outside a loop").into())
+                    }
+                    Err(Signal::Continue) => {
+                        Err(RuntimeError::new("'continue' used outside a loop").into())
+                    }
                     other => other,
                 }
             }
@@ -782,6 +828,18 @@ fn install_builtins(env: &EnvRef) {
         ("range_inclusive", builtin_range_inclusive as NativeFn),
         ("push", builtin_push as NativeFn),
         ("contains", builtin_contains as NativeFn),
+        ("get", builtin_get as NativeFn),
+        ("slice", builtin_slice as NativeFn),
+        ("slice_inclusive", builtin_slice_inclusive as NativeFn),
+        ("cursor", builtin_cursor as NativeFn),
+        ("current", builtin_current as NativeFn),
+        ("peek", builtin_peek as NativeFn),
+        ("peek_string", builtin_peek_string as NativeFn),
+        ("advance", builtin_advance as NativeFn),
+        ("take", builtin_take as NativeFn),
+        ("done", builtin_done as NativeFn),
+        ("starts_with", builtin_starts_with as NativeFn),
+        ("position", builtin_position as NativeFn),
         ("first", builtin_first as NativeFn),
         ("last", builtin_last as NativeFn),
         ("is_empty", builtin_is_empty as NativeFn),
@@ -958,6 +1016,250 @@ fn builtin_contains(args: Vec<Value>) -> RuntimeResult<Value> {
         }
     };
     Ok(Value::Bool(contains))
+}
+
+fn builtin_get(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("get", 2, args.len())?;
+    match (&args[0], &args[1]) {
+        (Value::List(values), Value::Int(index)) => {
+            let values = values.borrow();
+            let Some(index) = safe_index(*index, values.len()) else {
+                return Ok(Value::Null);
+            };
+            Ok(values[index].clone())
+        }
+        (Value::String(value), Value::Int(index)) => {
+            let chars: Vec<char> = value.chars().collect();
+            let Some(index) = safe_index(*index, chars.len()) else {
+                return Ok(Value::Null);
+            };
+            Ok(Value::String(chars[index].to_string()))
+        }
+        (Value::Record(record), Value::String(name)) => {
+            Ok(record.fields.get(name).cloned().unwrap_or(Value::Null))
+        }
+        (value, _) => Err(RuntimeError::new(format!(
+            "get() does not accept {}",
+            value.type_name()
+        ))),
+    }
+}
+
+fn builtin_slice(args: Vec<Value>) -> RuntimeResult<Value> {
+    slice_value(&args, false)
+}
+
+fn builtin_slice_inclusive(args: Vec<Value>) -> RuntimeResult<Value> {
+    slice_value(&args, true)
+}
+
+fn slice_value(args: &[Value], inclusive: bool) -> RuntimeResult<Value> {
+    let name = if inclusive {
+        "slice_inclusive"
+    } else {
+        "slice"
+    };
+    require_arity(name, 3, args.len())?;
+    let (Value::Int(start), Value::Int(end)) = (&args[1], &args[2]) else {
+        return Err(RuntimeError::new(format!("{name}() bounds must be Int")));
+    };
+
+    match &args[0] {
+        Value::List(values) => {
+            let values = values.borrow();
+            let (start, end) = normalize_slice_bounds(*start, *end, values.len(), inclusive)?;
+            Ok(Value::List(Rc::new(RefCell::new(
+                values[start..end].to_vec(),
+            ))))
+        }
+        Value::String(value) => {
+            let chars: Vec<char> = value.chars().collect();
+            let (start, end) = normalize_slice_bounds(*start, *end, chars.len(), inclusive)?;
+            Ok(Value::String(chars[start..end].iter().collect()))
+        }
+        value => Err(RuntimeError::new(format!(
+            "{name}() does not accept {}",
+            value.type_name()
+        ))),
+    }
+}
+
+fn builtin_cursor(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("cursor", 1, args.len())?;
+    let values = match &args[0] {
+        Value::List(values) => values.borrow().clone(),
+        Value::String(value) => value
+            .chars()
+            .map(|ch| Value::String(ch.to_string()))
+            .collect(),
+        value => {
+            return Err(RuntimeError::new(format!(
+                "cursor() does not accept {}",
+                value.type_name()
+            )))
+        }
+    };
+    Ok(Value::Cursor(Rc::new(RefCell::new(CursorState {
+        values,
+        position: 0,
+    }))))
+}
+
+fn cursor_ref(value: &Value) -> RuntimeResult<Rc<RefCell<CursorState>>> {
+    match value {
+        Value::Cursor(cursor) => Ok(Rc::clone(cursor)),
+        value => Err(RuntimeError::new(format!(
+            "cursor operation expects Cursor, got {}",
+            value.type_name()
+        ))),
+    }
+}
+
+fn builtin_current(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("current", 1, args.len())?;
+    let cursor = cursor_ref(&args[0])?;
+    let cursor = cursor.borrow();
+    Ok(cursor
+        .values
+        .get(cursor.position)
+        .cloned()
+        .unwrap_or(Value::Null))
+}
+
+fn builtin_peek(args: Vec<Value>) -> RuntimeResult<Value> {
+    if !(1..=2).contains(&args.len()) {
+        return Err(RuntimeError::new(format!(
+            "peek() expects 1 or 2 arguments, got {}",
+            args.len()
+        )));
+    }
+    let offset = match args.get(1) {
+        None => 1usize,
+        Some(Value::Int(value)) if *value >= 0 => {
+            usize::try_from(*value).map_err(|_| RuntimeError::new("peek() offset is too large"))?
+        }
+        Some(_) => {
+            return Err(RuntimeError::new(
+                "peek() offset must be a non-negative Int",
+            ))
+        }
+    };
+    let cursor = cursor_ref(&args[0])?;
+    let cursor = cursor.borrow();
+    Ok(cursor
+        .position
+        .checked_add(offset)
+        .and_then(|index| cursor.values.get(index))
+        .cloned()
+        .unwrap_or(Value::Null))
+}
+
+fn builtin_peek_string(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("peek_string", 2, args.len())?;
+    let Value::Int(count) = args[1] else {
+        return Err(RuntimeError::new("peek_string() count must be Int"));
+    };
+    if count < 0 {
+        return Err(RuntimeError::new(
+            "peek_string() count must be non-negative",
+        ));
+    }
+    let count = usize::try_from(count).map_err(|_| RuntimeError::new("count is too large"))?;
+    let cursor = cursor_ref(&args[0])?;
+    let cursor = cursor.borrow();
+    let end = cursor
+        .position
+        .saturating_add(count)
+        .min(cursor.values.len());
+    let mut output = String::new();
+    for value in &cursor.values[cursor.position..end] {
+        let Value::String(value) = value else {
+            return Err(RuntimeError::new("peek_string() requires a String cursor"));
+        };
+        output.push_str(value);
+    }
+    Ok(Value::String(output))
+}
+
+fn builtin_advance(args: Vec<Value>) -> RuntimeResult<Value> {
+    if !(1..=2).contains(&args.len()) {
+        return Err(RuntimeError::new(format!(
+            "advance() expects 1 or 2 arguments, got {}",
+            args.len()
+        )));
+    }
+    let count = match args.get(1) {
+        None => 1usize,
+        Some(Value::Int(value)) if *value >= 0 => usize::try_from(*value)
+            .map_err(|_| RuntimeError::new("advance() count is too large"))?,
+        Some(_) => {
+            return Err(RuntimeError::new(
+                "advance() count must be a non-negative Int",
+            ))
+        }
+    };
+    let cursor = cursor_ref(&args[0])?;
+    let mut cursor = cursor.borrow_mut();
+    cursor.position = cursor
+        .position
+        .saturating_add(count)
+        .min(cursor.values.len());
+    Ok(Value::Null)
+}
+
+fn builtin_take(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("take", 1, args.len())?;
+    let cursor = cursor_ref(&args[0])?;
+    let mut cursor = cursor.borrow_mut();
+    let value = cursor
+        .values
+        .get(cursor.position)
+        .cloned()
+        .unwrap_or(Value::Null);
+    cursor.position = cursor.position.saturating_add(1).min(cursor.values.len());
+    Ok(value)
+}
+
+fn builtin_done(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("done", 1, args.len())?;
+    let cursor = cursor_ref(&args[0])?;
+    let cursor = cursor.borrow();
+    Ok(Value::Bool(cursor.position >= cursor.values.len()))
+}
+
+fn builtin_starts_with(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("starts_with", 2, args.len())?;
+    let cursor = cursor_ref(&args[0])?;
+    let cursor = cursor.borrow();
+    let needle: Vec<Value> = match &args[1] {
+        Value::String(value) => value
+            .chars()
+            .map(|ch| Value::String(ch.to_string()))
+            .collect(),
+        Value::List(values) => values.borrow().clone(),
+        value => {
+            return Err(RuntimeError::new(format!(
+                "starts_with() does not accept {}",
+                value.type_name()
+            )))
+        }
+    };
+    if cursor.position.saturating_add(needle.len()) > cursor.values.len() {
+        return Ok(Value::Bool(false));
+    }
+    Ok(Value::Bool(
+        cursor.values[cursor.position..cursor.position + needle.len()]
+            .iter()
+            .zip(needle.iter())
+            .all(|(left, right)| values_equal(left, right)),
+    ))
+}
+
+fn builtin_position(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("position", 1, args.len())?;
+    let cursor = cursor_ref(&args[0])?;
+    let position = cursor.borrow().position;
+    usize_to_int(position)
 }
 
 fn builtin_first(args: Vec<Value>) -> RuntimeResult<Value> {
@@ -1318,6 +1620,7 @@ fn values_equal(left: &Value, right: &Value) -> bool {
             let b = b.borrow();
             a.len() == b.len() && a.iter().zip(b.iter()).all(|(a, b)| values_equal(a, b))
         }
+        (Value::Cursor(a), Value::Cursor(b)) => Rc::ptr_eq(a, b),
         (Value::Record(a), Value::Record(b)) => {
             a.name == b.name
                 && a.fields.len() == b.fields.len()
@@ -1369,6 +1672,50 @@ fn index_value(object: Value, index: Value) -> RuntimeResult<Value> {
             index.type_name()
         ))),
     }
+}
+
+fn safe_index(index: i64, len: usize) -> Option<usize> {
+    let len = i64::try_from(len).ok()?;
+    let normalized = if index < 0 { len + index } else { index };
+    if normalized < 0 || normalized >= len {
+        return None;
+    }
+    usize::try_from(normalized).ok()
+}
+
+fn normalize_slice_bound(index: i64, len: usize, allow_end: bool) -> RuntimeResult<usize> {
+    let len_i64 = i64::try_from(len).map_err(|_| RuntimeError::new("collection too large"))?;
+    let normalized = if index < 0 { len_i64 + index } else { index };
+    let upper = if allow_end {
+        len_i64
+    } else {
+        len_i64.saturating_sub(1)
+    };
+    if normalized < 0 || normalized > upper {
+        return Err(RuntimeError::new(format!(
+            "slice bound {index} is out of bounds for length {len}"
+        )));
+    }
+    usize::try_from(normalized).map_err(|_| RuntimeError::new("invalid slice bound"))
+}
+
+fn normalize_slice_bounds(
+    start: i64,
+    end: i64,
+    len: usize,
+    inclusive: bool,
+) -> RuntimeResult<(usize, usize)> {
+    let start = normalize_slice_bound(start, len, true)?;
+    let mut end = normalize_slice_bound(end, len, !inclusive)?;
+    if inclusive {
+        end = end
+            .checked_add(1)
+            .ok_or_else(|| RuntimeError::new("slice bound overflow"))?;
+    }
+    if start > end {
+        return Err(RuntimeError::new("slice start must not exceed slice end"));
+    }
+    Ok((start, end))
 }
 
 fn normalize_index(index: i64, len: usize) -> RuntimeResult<usize> {

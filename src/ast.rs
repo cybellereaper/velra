@@ -34,6 +34,12 @@ pub enum Stmt {
         value: Expr,
     },
     Return(Option<Expr>),
+    While {
+        condition: Expr,
+        body: Block,
+    },
+    Break,
+    Continue,
     For {
         name: String,
         iterable: Expr,
