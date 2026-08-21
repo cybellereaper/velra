@@ -3,7 +3,6 @@ name: CI
 on:
   push:
     branches: [rust-self-hosted-bootstrap]
-  pull_request:
 
 permissions:
   contents: write
@@ -13,13 +12,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: rust-self-hosted-bootstrap
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - name: Format working tree
         run: cargo fmt --all
       - name: Commit bootstrap formatting
-        if: github.event_name == 'push'
         run: |
           if ! git diff --quiet -- src tests; then
             git config user.name "github-actions[bot]"
