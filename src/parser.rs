@@ -157,12 +157,19 @@ impl Parser {
     }
 
     fn parse_for(&mut self) -> Result<Stmt, ParseError> {
-        let name = self.take_identifier()?;
-        self.expect(&TokenKind::In, "expected 'in' after loop variable")?;
+        let pattern = self.parse_expression()?;
+        self.expect(&TokenKind::In, "expected 'in' after loop pattern")?;
         let iterable = self.parse_expression()?;
-        let body = self.parse_block()?;
+        let mut body = self.parse_block()?;
+        body.statements.insert(
+            0,
+            Stmt::Assign {
+                target: pattern,
+                value: Expr::Ident("$item".into()),
+            },
+        );
         Ok(Stmt::For {
-            name,
+            name: "$item".into(),
             iterable,
             body,
         })
@@ -553,6 +560,10 @@ impl Parser {
                     object: Box::new(expr),
                     index: Box::new(index),
                 };
+            } else if self.eat(&TokenKind::Question) {
+                expr = Expr::Propagate {
+                    expr: Box::new(expr),
+                };
             } else {
                 break;
             }
@@ -568,8 +579,9 @@ impl Parser {
             TokenKind::False => Ok(Expr::Bool(false)),
             TokenKind::Int(value) => Ok(Expr::Int(value)),
             TokenKind::Float(value) => Ok(Expr::Float(value)),
-            TokenKind::String(value) => Ok(Expr::String(value)),
+            TokenKind::String(value) => parse_interpolated_string(value, token.span.start),
             TokenKind::Ident(name) | TokenKind::DataIdent(name) => Ok(Expr::Ident(name)),
+            TokenKind::Pipe => self.parse_lambda(),
             TokenKind::LParen => {
                 self.consume_separators();
                 let expr = self.parse_expression()?;
@@ -601,6 +613,28 @@ impl Parser {
                 offset: token.span.start,
             }),
         }
+    }
+
+    fn parse_lambda(&mut self) -> Result<Expr, ParseError> {
+        self.consume_separators();
+        let mut params = Vec::new();
+        loop {
+            let name = self.take_identifier()?;
+            params.push(Param {
+                name,
+                type_name: None,
+            });
+            self.consume_separators();
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+            self.consume_separators();
+        }
+        self.expect(&TokenKind::Pipe, "expected '|' after lambda parameters")?;
+        Ok(Expr::Lambda {
+            params,
+            body: Box::new(self.parse_expression()?),
+        })
     }
 
     fn parse_list(&mut self) -> Result<Expr, ParseError> {
@@ -769,6 +803,123 @@ impl Parser {
     }
 }
 
+fn parse_interpolated_string(value: String, offset: usize) -> Result<Expr, ParseError> {
+    let chars: Vec<char> = value.chars().collect();
+    let mut parts = Vec::new();
+    let mut literal = String::new();
+    let mut index = 0usize;
+    let mut interpolated = false;
+
+    while index < chars.len() {
+        if chars[index] == '$' && index + 1 < chars.len() {
+            if chars[index + 1] == '$' {
+                literal.push('$');
+                index += 2;
+                continue;
+            }
+            if chars[index + 1] == '{' {
+                interpolated = true;
+                if !literal.is_empty() {
+                    parts.push(Expr::String(std::mem::take(&mut literal)));
+                }
+                let start = index + 2;
+                let end = find_interpolation_end(&chars, start).ok_or_else(|| ParseError {
+                    message: "unterminated string interpolation".into(),
+                    offset,
+                })?;
+                let fragment: String = chars[start..end].iter().collect();
+                if fragment.trim().is_empty() {
+                    return Err(ParseError {
+                        message: "string interpolation cannot be empty".into(),
+                        offset,
+                    });
+                }
+                let expr = parse_interpolation_expr(&fragment, offset)?;
+                parts.push(Expr::Call {
+                    callee: Box::new(Expr::Ident("string".into())),
+                    args: vec![expr],
+                });
+                index = end + 1;
+                continue;
+            }
+        }
+
+        literal.push(chars[index]);
+        index += 1;
+    }
+
+    if !interpolated {
+        return Ok(Expr::String(literal));
+    }
+    if !literal.is_empty() {
+        parts.push(Expr::String(literal));
+    }
+
+    let mut parts = parts.into_iter();
+    let mut expr = parts.next().unwrap_or_else(|| Expr::String(String::new()));
+    for part in parts {
+        expr = binary(expr, BinaryOp::Add, part);
+    }
+    Ok(expr)
+}
+
+fn find_interpolation_end(chars: &[char], start: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (index, ch) in chars.iter().copied().enumerate().skip(start) {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn parse_interpolation_expr(source: &str, offset: usize) -> Result<Expr, ParseError> {
+    let parser = Parser::from_source(source).map_err(|error| ParseError {
+        message: format!("invalid string interpolation: {}", error.message),
+        offset: offset + error.span.start,
+    })?;
+    let program = parser.parse_program().map_err(|error| ParseError {
+        message: format!("invalid string interpolation: {}", error.message),
+        offset: offset + error.offset,
+    })?;
+    let mut statements = program.statements;
+    if statements.len() != 1 {
+        return Err(ParseError {
+            message: "string interpolation must contain one expression".into(),
+            offset,
+        });
+    }
+    match statements.remove(0) {
+        Stmt::Expr(expr) => Ok(expr),
+        _ => Err(ParseError {
+            message: "string interpolation must contain an expression".into(),
+            offset,
+        }),
+    }
+}
+
 fn same_variant(left: &TokenKind, right: &TokenKind) -> bool {
     discriminant(left) == discriminant(right)
 }
@@ -797,6 +948,7 @@ fn can_start_command_argument(kind: &TokenKind) -> bool {
             | TokenKind::Bang
             | TokenKind::If
             | TokenKind::When
+            | TokenKind::Pipe
     )
 }
 
