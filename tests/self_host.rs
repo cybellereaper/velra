@@ -52,6 +52,18 @@ fn compiled_compiler_helpers_run() {
         Value::Bool(true)
     ));
     assert!(matches!(
+        invoke(compiler.clone(), "is_upper", "T"),
+        Value::Bool(true)
+    ));
+    assert!(matches!(
+        invoke(compiler.clone(), "is_letter", "T"),
+        Value::Bool(true)
+    ));
+    assert!(matches!(
+        invoke(compiler.clone(), "is_ident_start", "T"),
+        Value::Bool(true)
+    ));
+    assert!(matches!(
         invoke(compiler.clone(), "quote", "x"),
         Value::String(value) if value == "\"x\""
     ));
@@ -59,7 +71,11 @@ fn compiled_compiler_helpers_run() {
         invoke(compiler.clone(), "lex", ""),
         Value::List(_)
     ));
-    assert!(matches!(invoke(compiler, "lex", "x"), Value::List(_)));
+    assert!(matches!(
+        invoke(compiler.clone(), "lex", "x"),
+        Value::List(_)
+    ));
+    assert!(matches!(invoke(compiler, "lex", "T"), Value::List(_)));
 }
 
 #[test]
