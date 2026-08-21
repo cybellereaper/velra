@@ -113,6 +113,19 @@ fn encode_stmt(output: &mut String, statement: &Stmt) {
             }
             output.push_str("))");
         }
+        Stmt::Enum(decl) => {
+            output.push_str("(enum ");
+            encode_string(output, &decl.name);
+            output.push_str(" (variants");
+            for variant in &decl.variants {
+                output.push_str(" (variant ");
+                encode_string(output, &variant.name);
+                output.push(' ');
+                encode_params(output, &variant.params);
+                output.push(')');
+            }
+            output.push_str("))");
+        }
         Stmt::Expr(expr) => {
             output.push_str("(expr ");
             encode_expr(output, expr);
@@ -171,6 +184,30 @@ fn encode_expr(output: &mut String, expr: &Expr) {
                 output.push(' ');
                 encode_expr(output, item);
             }
+            output.push(')');
+        }
+        Expr::Map(entries) => {
+            output.push_str("(map");
+            for (key, value) in entries {
+                output.push_str(" (entry ");
+                encode_expr(output, key);
+                output.push(' ');
+                encode_expr(output, value);
+                output.push(')');
+            }
+            output.push(')');
+        }
+        Expr::Set(items) => {
+            output.push_str("(set");
+            for item in items {
+                output.push(' ');
+                encode_expr(output, item);
+            }
+            output.push(')');
+        }
+        Expr::Rest(name) => {
+            output.push_str("(rest ");
+            encode_string(output, name);
             output.push(')');
         }
         Expr::Unary { op, expr } => {
@@ -238,8 +275,14 @@ fn encode_expr(output: &mut String, expr: &Expr) {
             encode_else(output, else_branch.as_ref());
             output.push(')');
         }
-        Expr::When { subject, cases } => {
+        Expr::When {
+            binding,
+            subject,
+            cases,
+        } => {
             output.push_str("(when ");
+            encode_optional_string(output, binding.as_deref());
+            output.push(' ');
             encode_optional_expr(output, subject.as_deref());
             output.push_str(" (cases");
             for case in cases {

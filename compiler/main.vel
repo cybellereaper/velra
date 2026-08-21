@@ -3,45 +3,19 @@ Token(kind, text) {}
 var parse_tokens = []
 var parse_cursor = 0
 
-is_digit(ch) => ch >= "0" && ch <= "9"
-is_lower(ch) => ch >= "a" && ch <= "z"
-is_upper(ch) => ch >= "A" && ch <= "Z"
-is_letter(ch) => is_lower(ch) || is_upper(ch)
-is_ident_start(ch) => ch == "_" || is_letter(ch)
-is_ident_continue(ch) => is_ident_start(ch) || is_digit(ch)
+is_ident_start(ch) => ch == "_" || ch.is_letter()
+is_ident_continue(ch) => ch == "_" || ch.is_alphanumeric()
 
-characters(text) {
-    var output = []
-    for ch in text { output.push(ch) }
-    output
+KEYWORDS = {
+    "true": "true", "false": "false", "null": "null", "use": "use", "pub": "pub",
+    "var": "var", "if": "if", "else": "else", "for": "for", "while": "while",
+    "break": "break", "continue": "continue", "in": "in", "when": "when",
+    "return": "return", "require": "require", "enum": "enum", "object": "object",
+    "extend": "extend", "shape": "shape", "async": "async", "await": "await",
+    "try": "try", "throw": "throw"
 }
 
-keyword_kind(text) {
-    if text == "true" { return "true" }
-    if text == "false" { return "false" }
-    if text == "null" { return "null" }
-    if text == "use" { return "use" }
-    if text == "pub" { return "pub" }
-    if text == "var" { return "var" }
-    if text == "if" { return "if" }
-    if text == "else" { return "else" }
-    if text == "for" { return "for" }
-    if text == "while" { return "while" }
-    if text == "break" { return "break" }
-    if text == "continue" { return "continue" }
-    if text == "in" { return "in" }
-    if text == "when" { return "when" }
-    if text == "return" { return "return" }
-    if text == "require" { return "require" }
-    if text == "object" { return "object" }
-    if text == "extend" { return "extend" }
-    if text == "shape" { return "shape" }
-    if text == "async" { return "async" }
-    if text == "await" { return "await" }
-    if text == "try" { return "try" }
-    if text == "throw" { return "throw" }
-    null
-}
+keyword_kind(text) => KEYWORDS.get(text)
 
 decode_escape(ch) {
     if ch == "n" { return "\n" }
@@ -54,36 +28,22 @@ decode_escape(ch) {
     ch
 }
 
-THREE_CHAR_SYMBOLS = ["..="]
-TWO_CHAR_SYMBOLS = [
-    "==", "!=", "<=", ">=", "&&", "||", "|>", "..", "?.", "?:", "=>", "->",
-    "+=", "-=", "*=", "/=", "%="
-]
-SINGLE_CHAR_SYMBOLS = [
+MULTI_CHAR_SYMBOLS = #{
+    "...", "..=", "==", "!=", "<=", ">=", "&&", "||", "|>", "..", "?.", "?:",
+    "=>", "->", "+=", "-=", "*=", "/=", "%="
+}
+SINGLE_CHAR_SYMBOLS = #{
     "=", "+", "-", "*", "/", "%", "<", ">", "!", ".", ",", ":", ";", "?", "|",
-    "(", ")", "{", "}", "[", "]"
-]
-
-take_while(input, predicate) {
-    var output = ""
-    while !input.done() && predicate(input.current()) {
-        output += input.take()
-    }
-    output
+    "#", "(", ")", "{", "}", "[", "]"
 }
-
-skip_while(input, predicate) {
-    while !input.done() && predicate(input.current()) {
-        input.advance()
-    }
-}
+WHITESPACE = #{" ", "\t", "\r"}
 
 scan_number(input) {
-    var text = take_while(input, |ch| is_digit(ch))
+    var text = input.take_while(|ch| ch.is_digit())
     next = input.peek()
-    if input.current() == "." && next != null && is_digit(next) {
+    if input.current() == "." && next != null && next.is_digit() {
         text += input.take()
-        text += take_while(input, |ch| is_digit(ch))
+        text += input.take_while(|ch| ch.is_digit())
         return Token("float", text)
     }
     Token("int", text)
@@ -110,50 +70,40 @@ scan_string(input) {
 }
 
 scan_identifier(input) {
-    text = take_while(input, |ch| is_ident_continue(ch))
+    text = input.take_while(|ch| is_ident_continue(ch))
     keyword = keyword_kind(text)
-    kind = keyword ?: if is_upper(text.first()) { "data-ident" } else { "ident" }
+    kind = keyword ?: if text.first().is_upper() { "data-ident" } else { "ident" }
     Token(kind, text)
 }
 
 scan_symbol(input) {
-    triple = input.peek_string(3)
-    if triple in THREE_CHAR_SYMBOLS {
-        input.advance(3)
-        return Token(triple, triple)
-    }
-
-    pair = input.peek_string(2)
-    if pair in TWO_CHAR_SYMBOLS {
-        input.advance(2)
-        return Token(pair, pair)
-    }
+    symbol = input.match_longest(MULTI_CHAR_SYMBOLS)
+    if symbol != null { return Token(symbol, symbol) }
 
     ch = input.take()
     assert(ch in SINGLE_CHAR_SYMBOLS, "unexpected character in source")
     Token(if ch == ";" { "sep" } else { ch }, ch)
 }
 
-next_token(input) {
-    ch = input.current()
-    if ch in [" ", "\t", "\r"] {
-        input.advance()
-        return null
+next_token(input) => when ch = input.current() {
+        _ if ch in WHITESPACE => {
+            input.advance()
+            null
+        }
+        "\n" => {
+            input.advance()
+            Token("sep", "\n")
+        }
+        "/" if input.starts_with("//") => {
+            input.advance(2)
+            input.skip_until(|value| value == "\n")
+            null
+        }
+        _ if ch.is_digit() => scan_number(input)
+        "\"" => scan_string(input)
+        _ if is_ident_start(ch) => scan_identifier(input)
+        else => scan_symbol(input)
     }
-    if ch == "\n" {
-        input.advance()
-        return Token("sep", "\n")
-    }
-    if input.starts_with("//") {
-        input.advance(2)
-        skip_while(input, |value| value != "\n")
-        return null
-    }
-    if is_digit(ch) { return scan_number(input) }
-    if ch == "\"" { return scan_string(input) }
-    if is_ident_start(ch) { return scan_identifier(input) }
-    scan_symbol(input)
-}
 
 lex(source) {
     var result = []
@@ -409,6 +359,7 @@ parse_statement() {
     if eat("break") { return "(break)" }
     if eat("continue") { return "(continue)" }
     if eat("for") { return parse_for() }
+    if eat("enum") { return parse_enum() }
     if at("if") { return "(expr " + parse_if() + ")" }
     if at("when") { return "(expr " + parse_when() + ")" }
     if looks_like_data_decl() { return parse_data() }
@@ -480,6 +431,23 @@ parse_for() {
     binding = "(assign " + pattern + " (ident \"$item\"))"
     body = prepend_block_statement(parsed_body, binding)
     return "(for \"$item\" " + iterable + " " + body + ")"
+}
+
+
+parse_enum() {
+    name = expect("data-ident")
+    expect("{")
+    consume_separators()
+    var output = "(enum " + quote(name) + " (variants"
+    while !at("}") {
+        variant = expect("data-ident")
+        params = if at("(") { parse_params() } else { "(params)" }
+        output += " (variant " + quote(variant) + " " + params + ")"
+        if eat(",") { consume_separators() }
+        else if !at("}") { consume_separators() }
+    }
+    expect("}")
+    output + "))"
 }
 
 parse_function() {
@@ -576,13 +544,20 @@ parse_when_cases(output) {
 
 parse_when() {
     expect("when")
+    var binding = null
     var subject = "(none)"
-    if !at("{") { subject = "(some " + parse_expression() + ")" }
+    if !at("{") {
+        if at("ident") && kind_at(parse_cursor + 1) == "=" {
+            binding = expect("ident")
+            expect("=")
+        }
+        subject = "(some " + parse_expression() + ")"
+    }
     expect("{")
     consume_separators()
     cases = parse_when_cases("(cases")
     expect("}")
-    return "(when " + subject + " " + cases + ")"
+    return "(when " + optional_string(binding) + " " + subject + " " + cases + ")"
 }
 
 binary(left, op, right) => "(binary " + op + " " + left + " " + right + ")"
@@ -747,6 +722,12 @@ parse_postfix() => parse_postfix_tail(parse_primary())
 
 parse_list_tail(output) {
     if at("]") { return output }
+    if eat("...") {
+        name = expect("ident")
+        if eat(",") { consume_separators() }
+        assert(at("]"), "rest pattern must be final")
+        return output + " (rest " + quote(name) + ")"
+    }
     next_output = output + " " + parse_expression()
     consume_separators()
     if eat(",") {
@@ -756,6 +737,47 @@ parse_list_tail(output) {
     return next_output
 }
 
+
+
+parse_map_entries(output) {
+    if at("}") { return output }
+    key = parse_expression()
+    expect(":")
+    value = parse_expression()
+    next_output = output + " (entry " + key + " " + value + ")"
+    consume_separators()
+    if eat(",") {
+        consume_separators()
+        return parse_map_entries(next_output)
+    }
+    return next_output
+}
+
+parse_map() {
+    consume_separators()
+    output = parse_map_entries("(map")
+    expect("}")
+    output + ")"
+}
+
+parse_set_tail(output) {
+    if at("}") { return output }
+    next_output = output + " " + parse_expression()
+    consume_separators()
+    if eat(",") {
+        consume_separators()
+        return parse_set_tail(next_output)
+    }
+    return next_output
+}
+
+parse_set() {
+    expect("{")
+    consume_separators()
+    output = parse_set_tail("(set")
+    expect("}")
+    output + ")"
+}
 
 parse_lambda_params(output) {
     name = take_name()
@@ -810,6 +832,8 @@ parse_primary() {
         expect("]")
         return output + ")"
     }
+    if eat("{") { return parse_map() }
+    if eat("#") { return parse_set() }
     if at("if") { return parse_if() }
     if at("when") { return parse_when() }
     assert(false, "expected expression")

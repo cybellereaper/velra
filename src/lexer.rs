@@ -30,6 +30,7 @@ pub enum TokenKind {
     When,
     Return,
     Require,
+    Enum,
     Object,
     Extend,
     Shape,
@@ -49,6 +50,7 @@ pub enum TokenKind {
     Elvis,
     Range,
     RangeInclusive,
+    Ellipsis,
     PipeForward,
     Pipe,
     Assign,
@@ -70,6 +72,7 @@ pub enum TokenKind {
     Colon,
     Semi,
     Question,
+    Hash,
     LParen,
     RParen,
     LBrace,
@@ -316,10 +319,14 @@ impl<'a> Lexer<'a> {
             .get(self.cursor + 2)
             .map(|(_, third)| (ch, self.peek_char().unwrap_or_default(), *third));
 
-        if triple == Some(('.', '.', '=')) {
+        if let Some(kind) = match triple {
+            Some(('.', '.', '=')) => Some(TokenKind::RangeInclusive),
+            Some(('.', '.', '.')) => Some(TokenKind::Ellipsis),
+            _ => None,
+        } {
             self.cursor += 3;
             return Ok(Token {
-                kind: TokenKind::RangeInclusive,
+                kind,
                 span: Span::new(start, self.byte_after(self.cursor - 1)),
             });
         }
@@ -368,6 +375,7 @@ impl<'a> Lexer<'a> {
             ':' => TokenKind::Colon,
             ';' => TokenKind::Semi,
             '?' => TokenKind::Question,
+            '#' => TokenKind::Hash,
             '|' => TokenKind::Pipe,
             '(' => TokenKind::LParen,
             ')' => TokenKind::RParen,
@@ -408,6 +416,7 @@ fn keyword(text: &str) -> Option<TokenKind> {
         "when" => TokenKind::When,
         "return" => TokenKind::Return,
         "require" => TokenKind::Require,
+        "enum" => TokenKind::Enum,
         "object" => TokenKind::Object,
         "extend" => TokenKind::Extend,
         "shape" => TokenKind::Shape,
