@@ -1,0 +1,7 @@
+User(name: String) {
+    greeting => "Hello, " + name + "!"
+}
+
+greet(user) => println user.greeting
+
+greet User("Velra")
