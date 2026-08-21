@@ -1,3 +1,4 @@
 /target/
 *.velc
+!compiler/bootstrap.velc
 .DS_Store
