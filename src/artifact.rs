@@ -1,6 +1,6 @@
 use crate::ast::{
-    BinaryOp, Block, DataDecl, ElseBranch, Expr, FunctionBody, FunctionDecl, Param, Program, Stmt,
-    UnaryOp, WhenBody, WhenCase,
+    BinaryOp, Block, DataDecl, ElseBranch, EnumDecl, EnumVariantDecl, Expr, FunctionBody,
+    FunctionDecl, Param, Program, Stmt, UnaryOp, WhenBody, WhenCase,
 };
 use std::fmt;
 
@@ -251,6 +251,25 @@ fn decode_stmt(form: &Form) -> Result<Stmt, ArtifactError> {
                 computed: decode_computed(&list[3])?,
             }))
         }
+        "enum" => {
+            expect_len(list, 3, "enum")?;
+            let variants = expect_nonempty_list(&list[2], "enum variants")?;
+            expect_tag(variants, "variants")?;
+            let mut decoded = Vec::with_capacity(variants.len().saturating_sub(1));
+            for form in &variants[1..] {
+                let variant = expect_nonempty_list(form, "enum variant")?;
+                expect_tag(variant, "variant")?;
+                expect_len(variant, 3, "enum variant")?;
+                decoded.push(EnumVariantDecl {
+                    name: string(&variant[1])?.to_owned(),
+                    params: decode_params(&variant[2])?,
+                });
+            }
+            Ok(Stmt::Enum(EnumDecl {
+                name: string(&list[1])?.to_owned(),
+                variants: decoded,
+            }))
+        }
         "expr" => {
             expect_len(list, 2, "expr")?;
             Ok(Stmt::Expr(decode_expr(&list[1])?))
@@ -358,6 +377,27 @@ fn decode_expr(form: &Form) -> Result<Expr, ArtifactError> {
             }
             Ok(Expr::List(items))
         }
+        "map" => {
+            let mut entries = Vec::with_capacity(list.len().saturating_sub(1));
+            for form in &list[1..] {
+                let entry = expect_nonempty_list(form, "map entry")?;
+                expect_tag(entry, "entry")?;
+                expect_len(entry, 3, "map entry")?;
+                entries.push((decode_expr(&entry[1])?, decode_expr(&entry[2])?));
+            }
+            Ok(Expr::Map(entries))
+        }
+        "set" => {
+            let mut items = Vec::with_capacity(list.len().saturating_sub(1));
+            for item in &list[1..] {
+                items.push(decode_expr(item)?);
+            }
+            Ok(Expr::Set(items))
+        }
+        "rest" => {
+            expect_len(list, 2, "rest")?;
+            Ok(Expr::Rest(string(&list[1])?.to_owned()))
+        }
         "unary" => {
             expect_len(list, 3, "unary")?;
             Ok(Expr::Unary {
@@ -428,15 +468,16 @@ fn decode_expr(form: &Form) -> Result<Expr, ArtifactError> {
             })
         }
         "when" => {
-            expect_len(list, 3, "when")?;
-            let cases = expect_nonempty_list(&list[2], "when cases")?;
+            expect_len(list, 4, "when")?;
+            let cases = expect_nonempty_list(&list[3], "when cases")?;
             expect_tag(cases, "cases")?;
             let mut decoded = Vec::with_capacity(cases.len().saturating_sub(1));
             for case in &cases[1..] {
                 decoded.push(decode_when_case(case)?);
             }
             Ok(Expr::When {
-                subject: decode_optional_expr(&list[1])?.map(Box::new),
+                binding: decode_optional_string(&list[1])?,
+                subject: decode_optional_expr(&list[2])?.map(Box::new),
                 cases: decoded,
             })
         }

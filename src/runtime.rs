@@ -1,6 +1,6 @@
 use crate::ast::{
-    BinaryOp, Block, DataDecl, ElseBranch, Expr, FunctionBody, FunctionDecl, Param, Program, Stmt,
-    UnaryOp, WhenBody,
+    BinaryOp, Block, DataDecl, ElseBranch, EnumDecl, Expr, FunctionBody, FunctionDecl, Param,
+    Program, Stmt, UnaryOp, WhenBody,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -41,6 +41,8 @@ pub enum Value {
     Float(f64),
     String(String),
     List(Rc<RefCell<Vec<Value>>>),
+    Map(Rc<RefCell<Vec<(Value, Value)>>>),
+    Set(Rc<RefCell<Vec<Value>>>),
     Cursor(Rc<RefCell<CursorState>>),
     Record(Rc<Record>),
     Function(Rc<UserFunction>),
@@ -57,8 +59,10 @@ impl Value {
             Self::Float(_) => "Float",
             Self::String(_) => "String",
             Self::List(_) => "List",
+            Self::Map(_) => "Map",
+            Self::Set(_) => "Set",
             Self::Cursor(_) => "Cursor",
-            Self::Record(record) => &record.name,
+            Self::Record(record) => &record.type_name,
             Self::Function(_) => "Function",
             Self::Constructor(_) => "Type",
             Self::Native(_) => "Function",
@@ -85,6 +89,8 @@ impl fmt::Debug for Value {
             Self::Float(value) => f.debug_tuple("Float").field(value).finish(),
             Self::String(value) => f.debug_tuple("String").field(value).finish(),
             Self::List(values) => f.debug_tuple("List").field(&*values.borrow()).finish(),
+            Self::Map(entries) => f.debug_tuple("Map").field(&*entries.borrow()).finish(),
+            Self::Set(values) => f.debug_tuple("Set").field(&*values.borrow()).finish(),
             Self::Cursor(cursor) => f.debug_tuple("Cursor").field(&*cursor.borrow()).finish(),
             Self::Record(record) => f.debug_tuple("Record").field(record).finish(),
             Self::Function(function) => f.debug_tuple("Function").field(&function.name).finish(),
@@ -112,6 +118,26 @@ impl fmt::Display for Value {
                 }
                 f.write_str("]")
             }
+            Self::Map(entries) => {
+                f.write_str("{")?;
+                for (index, (key, value)) in entries.borrow().iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{key}: {value}")?;
+                }
+                f.write_str("}")
+            }
+            Self::Set(values) => {
+                f.write_str("#{")?;
+                for (index, value) in values.borrow().iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{value}")?;
+                }
+                f.write_str("}")
+            }
             Self::Cursor(cursor) => {
                 let cursor = cursor.borrow();
                 write!(f, "<cursor {}/{}>", cursor.position, cursor.values.len())
@@ -137,11 +163,13 @@ impl fmt::Display for Value {
 pub struct CursorState {
     values: Vec<Value>,
     position: usize,
+    is_string: bool,
 }
 
 #[derive(Debug)]
 pub struct Record {
     pub name: String,
+    pub type_name: String,
     pub fields: BTreeMap<String, Value>,
     pub positional_fields: Vec<String>,
 }
@@ -157,6 +185,7 @@ pub struct UserFunction {
 #[derive(Clone)]
 pub struct DataType {
     name: String,
+    type_name: String,
     params: Vec<Param>,
     computed: Vec<(String, Expr)>,
     closure: EnvRef,
@@ -317,6 +346,10 @@ impl Interpreter {
                 self.define_data(decl, env)?;
                 Ok(Value::Null)
             }
+            Stmt::Enum(decl) => {
+                self.define_enum(decl, env)?;
+                Ok(Value::Null)
+            }
             Stmt::Expr(expr) => self.eval_expr(expr, env),
             Stmt::Pub(inner) => self.eval_statement(inner, env),
         }
@@ -336,11 +369,35 @@ impl Interpreter {
     fn define_data(&self, decl: &DataDecl, env: EnvRef) -> EvalResult<()> {
         let data = DataType {
             name: decl.name.clone(),
+            type_name: decl.name.clone(),
             params: decl.params.clone(),
             computed: decl.computed.clone(),
             closure: Rc::clone(&env),
         };
         define(&env, &decl.name, Value::Constructor(Rc::new(data)), false)?;
+        Ok(())
+    }
+
+    fn define_enum(&self, decl: &EnumDecl, env: EnvRef) -> EvalResult<()> {
+        for variant in &decl.variants {
+            let value = if variant.params.is_empty() {
+                Value::Record(Rc::new(Record {
+                    name: variant.name.clone(),
+                    type_name: decl.name.clone(),
+                    fields: BTreeMap::new(),
+                    positional_fields: Vec::new(),
+                }))
+            } else {
+                Value::Constructor(Rc::new(DataType {
+                    name: variant.name.clone(),
+                    type_name: decl.name.clone(),
+                    params: variant.params.clone(),
+                    computed: Vec::new(),
+                    closure: Rc::clone(&env),
+                }))
+            };
+            define(&env, &variant.name, value, false)?;
+        }
         Ok(())
     }
 
@@ -360,18 +417,36 @@ impl Interpreter {
                     return Err(RuntimeError::new("list destructuring expects List").into());
                 };
                 let values = values.borrow().clone();
-                if patterns.len() != values.len() {
+                let rest = patterns.last().and_then(|pattern| match pattern {
+                    Expr::Rest(name) => Some(name),
+                    _ => None,
+                });
+                let fixed = patterns.len().saturating_sub(usize::from(rest.is_some()));
+                if (rest.is_none() && fixed != values.len())
+                    || (rest.is_some() && values.len() < fixed)
+                {
                     return Err(RuntimeError::new(format!(
-                        "list destructuring expects {} values, got {}",
-                        patterns.len(),
+                        "list destructuring expects {} values{}, got {}",
+                        fixed,
+                        if rest.is_some() { " or more" } else { "" },
                         values.len()
                     ))
                     .into());
                 }
-                for (pattern, value) in patterns.iter().zip(values) {
-                    self.assign_target(pattern, value, Rc::clone(&env))?;
+                for (pattern, value) in patterns[..fixed].iter().zip(values[..fixed].iter()) {
+                    self.assign_target(pattern, value.clone(), Rc::clone(&env))?;
+                }
+                if let Some(name) = rest {
+                    self.assign_target(
+                        &Expr::Ident(name.clone()),
+                        Value::List(Rc::new(RefCell::new(values[fixed..].to_vec()))),
+                        env,
+                    )?;
                 }
                 Ok(())
+            }
+            Expr::Rest(_) => {
+                Err(RuntimeError::new("rest pattern is only valid inside a list pattern").into())
             }
             Expr::Call { callee, args } => {
                 let Expr::Ident(expected_name) = callee.as_ref() else {
@@ -450,15 +525,35 @@ impl Interpreter {
                     return Ok(false);
                 };
                 let values = values.borrow().clone();
-                if patterns.len() != values.len() {
+                let rest = patterns.last().and_then(|pattern| match pattern {
+                    Expr::Rest(name) => Some(name),
+                    _ => None,
+                });
+                let fixed = patterns.len().saturating_sub(usize::from(rest.is_some()));
+                if (rest.is_none() && fixed != values.len())
+                    || (rest.is_some() && values.len() < fixed)
+                {
                     return Ok(false);
                 }
-                for (pattern, value) in patterns.iter().zip(values.iter()) {
+                for (pattern, value) in patterns[..fixed].iter().zip(values[..fixed].iter()) {
                     if !self.match_pattern(pattern, value, Rc::clone(&env))? {
                         return Ok(false);
                     }
                 }
+                if let Some(name) = rest {
+                    if name != "_" {
+                        define(
+                            &env,
+                            name,
+                            Value::List(Rc::new(RefCell::new(values[fixed..].to_vec()))),
+                            false,
+                        )?;
+                    }
+                }
                 Ok(true)
+            }
+            Expr::Rest(_) => {
+                Err(RuntimeError::new("rest pattern is only valid inside a list pattern").into())
             }
             Expr::Call { callee, args } => {
                 let Expr::Ident(expected_name) = callee.as_ref() else {
@@ -527,6 +622,35 @@ impl Interpreter {
                 }
                 Ok(Value::List(Rc::new(RefCell::new(values))))
             }
+            Expr::Map(entries) => {
+                let mut values: Vec<(Value, Value)> = Vec::with_capacity(entries.len());
+                for (key, value) in entries {
+                    let key = self.eval_expr(key, Rc::clone(&env))?;
+                    let value = self.eval_expr(value, Rc::clone(&env))?;
+                    if let Some((_, existing)) = values
+                        .iter_mut()
+                        .find(|(existing, _)| values_equal(existing, &key))
+                    {
+                        *existing = value;
+                    } else {
+                        values.push((key, value));
+                    }
+                }
+                Ok(Value::Map(Rc::new(RefCell::new(values))))
+            }
+            Expr::Set(items) => {
+                let mut values = Vec::with_capacity(items.len());
+                for item in items {
+                    let value = self.eval_expr(item, Rc::clone(&env))?;
+                    if !values.iter().any(|existing| values_equal(existing, &value)) {
+                        values.push(value);
+                    }
+                }
+                Ok(Value::Set(Rc::new(RefCell::new(values))))
+            }
+            Expr::Rest(_) => {
+                Err(RuntimeError::new("rest pattern cannot be evaluated as a value").into())
+            }
             Expr::Unary { op, expr } => {
                 let value = self.eval_expr(expr, env)?;
                 eval_unary(*op, value).map_err(Into::into)
@@ -541,6 +665,14 @@ impl Interpreter {
                     let mut argument_values = Vec::with_capacity(args.len());
                     for arg in args {
                         argument_values.push(self.eval_expr(arg, Rc::clone(&env))?);
+                    }
+                    if matches!(receiver, Value::Cursor(_))
+                        && matches!(
+                            name.as_str(),
+                            "take_while" | "take_until" | "skip_while" | "skip_until"
+                        )
+                    {
+                        return self.call_cursor_predicate_method(receiver, name, argument_values);
                     }
                     match member(receiver.clone(), name) {
                         Ok(member_value) => return self.call(member_value, argument_values),
@@ -620,7 +752,11 @@ impl Interpreter {
                     }
                 }
             }
-            Expr::When { subject, cases } => {
+            Expr::When {
+                binding,
+                subject,
+                cases,
+            } => {
                 let subject = match subject {
                     Some(subject) => Some(self.eval_expr(subject, Rc::clone(&env))?),
                     None => None,
@@ -629,12 +765,18 @@ impl Interpreter {
                 for case in cases {
                     if case.is_else {
                         let case_env = Environment::child(&env);
+                        if let (Some(binding), Some(subject)) = (binding, subject.as_ref()) {
+                            define(&case_env, binding, subject.clone(), false)?;
+                        }
                         return self.eval_when_body(&case.body, case_env);
                     }
 
                     if let Some(subject) = &subject {
                         for pattern in &case.patterns {
                             let case_env = Environment::child(&env);
+                            if let Some(binding) = binding {
+                                define(&case_env, binding, subject.clone(), false)?;
+                            }
                             if !self.match_pattern(pattern, subject, Rc::clone(&case_env))? {
                                 continue;
                             }
@@ -666,6 +808,47 @@ impl Interpreter {
                 Ok(Value::Null)
             }
         }
+    }
+
+    fn call_cursor_predicate_method(
+        &mut self,
+        receiver: Value,
+        name: &str,
+        args: Vec<Value>,
+    ) -> EvalResult<Value> {
+        require_arity(name, 1, args.len())?;
+        let predicate = args[0].clone();
+        let cursor = cursor_ref(&receiver)?;
+        let mut taken = Vec::new();
+
+        loop {
+            let current = {
+                let cursor = cursor.borrow();
+                cursor.values.get(cursor.position).cloned()
+            };
+            let Some(current) = current else { break };
+            let matched = self
+                .call(predicate.clone(), vec![current.clone()])?
+                .expect_bool(name)?;
+            let should_consume = match name {
+                "take_while" | "skip_while" => matched,
+                "take_until" | "skip_until" => !matched,
+                _ => unreachable!("validated cursor predicate method"),
+            };
+            if !should_consume {
+                break;
+            }
+            if name.starts_with("take_") {
+                taken.push(current);
+            }
+            cursor.borrow_mut().position += 1;
+        }
+
+        if name.starts_with("skip_") {
+            return Ok(Value::Null);
+        }
+        let is_string = cursor.borrow().is_string;
+        cursor_values_to_value(is_string, taken).map_err(Into::into)
     }
 
     fn eval_binary(
@@ -752,6 +935,7 @@ impl Interpreter {
                 }
                 Ok(Value::Record(Rc::new(Record {
                     name: data.name.clone(),
+                    type_name: data.type_name.clone(),
                     fields,
                     positional_fields: data.params.iter().map(|param| param.name.clone()).collect(),
                 })))
@@ -839,7 +1023,16 @@ fn install_builtins(env: &EnvRef) {
         ("take", builtin_take as NativeFn),
         ("done", builtin_done as NativeFn),
         ("starts_with", builtin_starts_with as NativeFn),
+        ("consume", builtin_consume as NativeFn),
+        ("expect_next", builtin_expect_next as NativeFn),
+        ("match_longest", builtin_match_longest as NativeFn),
         ("position", builtin_position as NativeFn),
+        ("is_digit", builtin_is_digit as NativeFn),
+        ("is_upper", builtin_is_upper as NativeFn),
+        ("is_lower", builtin_is_lower as NativeFn),
+        ("is_letter", builtin_is_letter as NativeFn),
+        ("is_alphanumeric", builtin_is_alphanumeric as NativeFn),
+        ("is_whitespace", builtin_is_whitespace as NativeFn),
         ("first", builtin_first as NativeFn),
         ("last", builtin_last as NativeFn),
         ("is_empty", builtin_is_empty as NativeFn),
@@ -881,6 +1074,7 @@ fn install_variant(env: &EnvRef, name: &str, fields: &[&str]) {
         .collect();
     let data = DataType {
         name: name.to_owned(),
+        type_name: name.to_owned(),
         params,
         computed: Vec::new(),
         closure: Rc::clone(env),
@@ -930,6 +1124,8 @@ fn builtin_len(args: Vec<Value>) -> RuntimeResult<Value> {
     let len = match &args[0] {
         Value::String(value) => value.chars().count(),
         Value::List(values) => values.borrow().len(),
+        Value::Map(entries) => entries.borrow().len(),
+        Value::Set(values) => values.borrow().len(),
         Value::Record(record) => record.fields.len(),
         value => {
             return Err(RuntimeError::new(format!(
@@ -1007,6 +1203,14 @@ fn builtin_contains(args: Vec<Value>) -> RuntimeResult<Value> {
             .iter()
             .any(|value| values_equal(value, needle)),
         (Value::String(value), Value::String(needle)) => value.contains(needle),
+        (Value::Map(entries), key) => entries
+            .borrow()
+            .iter()
+            .any(|(existing, _)| values_equal(existing, key)),
+        (Value::Set(values), needle) => values
+            .borrow()
+            .iter()
+            .any(|value| values_equal(value, needle)),
         (Value::Record(record), Value::String(field)) => record.fields.contains_key(field),
         (value, _) => {
             return Err(RuntimeError::new(format!(
@@ -1035,6 +1239,12 @@ fn builtin_get(args: Vec<Value>) -> RuntimeResult<Value> {
             };
             Ok(Value::String(chars[index].to_string()))
         }
+        (Value::Map(entries), key) => Ok(entries
+            .borrow()
+            .iter()
+            .find(|(existing, _)| values_equal(existing, key))
+            .map(|(_, value)| value.clone())
+            .unwrap_or(Value::Null)),
         (Value::Record(record), Value::String(name)) => {
             Ok(record.fields.get(name).cloned().unwrap_or(Value::Null))
         }
@@ -1086,12 +1296,15 @@ fn slice_value(args: &[Value], inclusive: bool) -> RuntimeResult<Value> {
 
 fn builtin_cursor(args: Vec<Value>) -> RuntimeResult<Value> {
     require_arity("cursor", 1, args.len())?;
-    let values = match &args[0] {
-        Value::List(values) => values.borrow().clone(),
-        Value::String(value) => value
-            .chars()
-            .map(|ch| Value::String(ch.to_string()))
-            .collect(),
+    let (values, is_string) = match &args[0] {
+        Value::List(values) => (values.borrow().clone(), false),
+        Value::String(value) => (
+            value
+                .chars()
+                .map(|ch| Value::String(ch.to_string()))
+                .collect(),
+            true,
+        ),
         value => {
             return Err(RuntimeError::new(format!(
                 "cursor() does not accept {}",
@@ -1102,6 +1315,7 @@ fn builtin_cursor(args: Vec<Value>) -> RuntimeResult<Value> {
     Ok(Value::Cursor(Rc::new(RefCell::new(CursorState {
         values,
         position: 0,
+        is_string,
     }))))
 }
 
@@ -1255,6 +1469,168 @@ fn builtin_starts_with(args: Vec<Value>) -> RuntimeResult<Value> {
     ))
 }
 
+fn cursor_values_to_value(is_string: bool, values: Vec<Value>) -> RuntimeResult<Value> {
+    if is_string {
+        let mut output = String::new();
+        for value in values {
+            let Value::String(value) = value else {
+                return Err(RuntimeError::new(
+                    "String cursor contained a non-String value",
+                ));
+            };
+            output.push_str(&value);
+        }
+        Ok(Value::String(output))
+    } else {
+        Ok(Value::List(Rc::new(RefCell::new(values))))
+    }
+}
+
+fn cursor_needle(needle: &Value) -> RuntimeResult<Vec<Value>> {
+    match needle {
+        Value::String(value) => Ok(value
+            .chars()
+            .map(|ch| Value::String(ch.to_string()))
+            .collect()),
+        Value::List(values) => Ok(values.borrow().clone()),
+        value => Ok(vec![value.clone()]),
+    }
+}
+
+fn cursor_matches(cursor: &CursorState, needle: &[Value]) -> bool {
+    if cursor.position.saturating_add(needle.len()) > cursor.values.len() {
+        return false;
+    }
+    cursor.values[cursor.position..cursor.position + needle.len()]
+        .iter()
+        .zip(needle.iter())
+        .all(|(left, right)| values_equal(left, right))
+}
+
+fn builtin_consume(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("consume", 2, args.len())?;
+    let cursor = cursor_ref(&args[0])?;
+    let needle = cursor_needle(&args[1])?;
+    let matched = {
+        let cursor = cursor.borrow();
+        cursor_matches(&cursor, &needle)
+    };
+    if matched {
+        cursor.borrow_mut().position += needle.len();
+    }
+    Ok(Value::Bool(matched))
+}
+
+fn builtin_expect_next(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("expect_next", 2, args.len())?;
+    let cursor = cursor_ref(&args[0])?;
+    let needle = cursor_needle(&args[1])?;
+    let matched = {
+        let cursor = cursor.borrow();
+        cursor_matches(&cursor, &needle)
+    };
+    if !matched {
+        return Err(RuntimeError::new(format!(
+            "cursor expected {}, found {}",
+            args[1],
+            builtin_current(vec![args[0].clone()])?
+        )));
+    }
+    cursor.borrow_mut().position += needle.len();
+    Ok(args[1].clone())
+}
+
+fn builtin_match_longest(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("match_longest", 2, args.len())?;
+    let cursor = cursor_ref(&args[0])?;
+    let candidates = match &args[1] {
+        Value::List(values) | Value::Set(values) => values.borrow().clone(),
+        value => {
+            return Err(RuntimeError::new(format!(
+                "match_longest() candidates must be List or Set, got {}",
+                value.type_name()
+            )))
+        }
+    };
+    let mut best: Option<(String, usize)> = None;
+    for candidate in candidates {
+        let Value::String(text) = candidate else {
+            return Err(RuntimeError::new(
+                "match_longest() candidates must contain only String values",
+            ));
+        };
+        let needle: Vec<Value> = text
+            .chars()
+            .map(|ch| Value::String(ch.to_string()))
+            .collect();
+        if cursor_matches(&cursor.borrow(), &needle)
+            && best.as_ref().map_or(true, |(_, len)| needle.len() > *len)
+        {
+            best = Some((text, needle.len()));
+        }
+    }
+    if let Some((text, len)) = best {
+        cursor.borrow_mut().position += len;
+        Ok(Value::String(text))
+    } else {
+        Ok(Value::Null)
+    }
+}
+
+fn single_char(value: &Value, name: &str) -> RuntimeResult<char> {
+    let Value::String(value) = value else {
+        return Err(RuntimeError::new(format!("{name}() expects String")));
+    };
+    let mut chars = value.chars();
+    let Some(ch) = chars.next() else {
+        return Err(RuntimeError::new(format!("{name}() expects one character")));
+    };
+    if chars.next().is_some() {
+        return Err(RuntimeError::new(format!("{name}() expects one character")));
+    }
+    Ok(ch)
+}
+
+fn builtin_is_digit(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("is_digit", 1, args.len())?;
+    Ok(Value::Bool(single_char(&args[0], "is_digit")?.is_numeric()))
+}
+
+fn builtin_is_upper(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("is_upper", 1, args.len())?;
+    Ok(Value::Bool(
+        single_char(&args[0], "is_upper")?.is_uppercase(),
+    ))
+}
+
+fn builtin_is_lower(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("is_lower", 1, args.len())?;
+    Ok(Value::Bool(
+        single_char(&args[0], "is_lower")?.is_lowercase(),
+    ))
+}
+
+fn builtin_is_letter(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("is_letter", 1, args.len())?;
+    Ok(Value::Bool(
+        single_char(&args[0], "is_letter")?.is_alphabetic(),
+    ))
+}
+
+fn builtin_is_alphanumeric(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("is_alphanumeric", 1, args.len())?;
+    Ok(Value::Bool(
+        single_char(&args[0], "is_alphanumeric")?.is_alphanumeric(),
+    ))
+}
+
+fn builtin_is_whitespace(args: Vec<Value>) -> RuntimeResult<Value> {
+    require_arity("is_whitespace", 1, args.len())?;
+    Ok(Value::Bool(
+        single_char(&args[0], "is_whitespace")?.is_whitespace(),
+    ))
+}
+
 fn builtin_position(args: Vec<Value>) -> RuntimeResult<Value> {
     require_arity("position", 1, args.len())?;
     let cursor = cursor_ref(&args[0])?;
@@ -1298,6 +1674,8 @@ fn builtin_is_empty(args: Vec<Value>) -> RuntimeResult<Value> {
     require_arity("is_empty", 1, args.len())?;
     let empty = match &args[0] {
         Value::List(values) => values.borrow().is_empty(),
+        Value::Map(entries) => entries.borrow().is_empty(),
+        Value::Set(values) => values.borrow().is_empty(),
         Value::String(value) => value.is_empty(),
         Value::Record(record) => record.fields.is_empty(),
         value => {
@@ -1459,6 +1837,14 @@ fn require_arity(name: &str, expected: usize, actual: usize) -> RuntimeResult<()
 fn iterable_values(value: Value) -> RuntimeResult<Vec<Value>> {
     match value {
         Value::List(values) => Ok(values.borrow().clone()),
+        Value::Set(values) => Ok(values.borrow().clone()),
+        Value::Map(entries) => Ok(entries
+            .borrow()
+            .iter()
+            .map(|(key, value)| {
+                Value::List(Rc::new(RefCell::new(vec![key.clone(), value.clone()])))
+            })
+            .collect()),
         Value::String(value) => Ok(value
             .chars()
             .map(|ch| Value::String(ch.to_string()))
@@ -1620,6 +2006,23 @@ fn values_equal(left: &Value, right: &Value) -> bool {
             let b = b.borrow();
             a.len() == b.len() && a.iter().zip(b.iter()).all(|(a, b)| values_equal(a, b))
         }
+        (Value::Set(a), Value::Set(b)) => {
+            let a = a.borrow();
+            let b = b.borrow();
+            a.len() == b.len()
+                && a.iter()
+                    .all(|value| b.iter().any(|other| values_equal(value, other)))
+        }
+        (Value::Map(a), Value::Map(b)) => {
+            let a = a.borrow();
+            let b = b.borrow();
+            a.len() == b.len()
+                && a.iter().all(|(key, value)| {
+                    b.iter().any(|(other_key, other_value)| {
+                        values_equal(key, other_key) && values_equal(value, other_value)
+                    })
+                })
+        }
         (Value::Cursor(a), Value::Cursor(b)) => Rc::ptr_eq(a, b),
         (Value::Record(a), Value::Record(b)) => {
             a.name == b.name
@@ -1661,6 +2064,12 @@ fn index_value(object: Value, index: Value) -> RuntimeResult<Value> {
             let index = normalize_index(index, chars.len())?;
             Ok(Value::String(chars[index].to_string()))
         }
+        (Value::Map(entries), key) => entries
+            .borrow()
+            .iter()
+            .find(|(existing, _)| values_equal(existing, &key))
+            .map(|(_, value)| value.clone())
+            .ok_or_else(|| RuntimeError::new(format!("map key not found: {key}"))),
         (Value::Record(record), Value::String(name)) => record
             .fields
             .get(&name)

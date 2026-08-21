@@ -1,6 +1,6 @@
 use crate::ast::{
-    BinaryOp, Block, DataDecl, ElseBranch, Expr, FunctionBody, FunctionDecl, Param, Program, Stmt,
-    UnaryOp, WhenBody, WhenCase,
+    BinaryOp, Block, DataDecl, ElseBranch, EnumDecl, EnumVariantDecl, Expr, FunctionBody,
+    FunctionDecl, Param, Program, Stmt, UnaryOp, WhenBody, WhenCase,
 };
 use crate::lexer::{lex, LexError, Token, TokenKind};
 use std::fmt;
@@ -64,7 +64,11 @@ impl Parser {
             let statement = self.parse_statement()?;
             if !matches!(
                 statement,
-                Stmt::Function(_) | Stmt::Var { .. } | Stmt::Assign { .. } | Stmt::Data(_)
+                Stmt::Function(_)
+                    | Stmt::Var { .. }
+                    | Stmt::Assign { .. }
+                    | Stmt::Data(_)
+                    | Stmt::Enum(_)
             ) {
                 return Err(self.error("'pub' is only valid on declarations"));
             }
@@ -94,6 +98,9 @@ impl Parser {
         }
         if self.eat(&TokenKind::For) {
             return self.parse_for();
+        }
+        if self.eat(&TokenKind::Enum) {
+            return self.parse_enum().map(Stmt::Enum);
         }
         if self.at(&TokenKind::If) {
             return Ok(Stmt::Expr(self.parse_if()?));
@@ -259,6 +266,39 @@ impl Parser {
         })
     }
 
+    fn parse_enum(&mut self) -> Result<EnumDecl, ParseError> {
+        let name = self.take_data_identifier()?;
+        self.expect(&TokenKind::LBrace, "expected '{' after enum name")?;
+        self.consume_separators();
+        let mut variants = Vec::new();
+        while !self.at(&TokenKind::RBrace) {
+            if self.at(&TokenKind::Eof) {
+                return Err(self.error("unterminated enum declaration"));
+            }
+            let variant_name = self.take_data_identifier()?;
+            let params = if self.at(&TokenKind::LParen) {
+                self.parse_params()?
+            } else {
+                Vec::new()
+            };
+            variants.push(EnumVariantDecl {
+                name: variant_name,
+                params,
+            });
+
+            if self.eat(&TokenKind::Comma) {
+                self.consume_separators();
+            } else if !self.at(&TokenKind::RBrace) && !self.consume_separators() {
+                return Err(self.error("expected ',' or newline between enum variants"));
+            }
+        }
+        self.expect(&TokenKind::RBrace, "expected '}' after enum variants")?;
+        if variants.is_empty() {
+            return Err(self.error("enum must declare at least one variant"));
+        }
+        Ok(EnumDecl { name, variants })
+    }
+
     fn parse_params(&mut self) -> Result<Vec<Param>, ParseError> {
         self.expect(&TokenKind::LParen, "expected '('")?;
         self.consume_separators();
@@ -335,10 +375,22 @@ impl Parser {
 
     fn parse_when(&mut self) -> Result<Expr, ParseError> {
         self.expect(&TokenKind::When, "expected 'when'")?;
-        let subject = if self.at(&TokenKind::LBrace) {
-            None
+        let (binding, subject) = if self.at(&TokenKind::LBrace) {
+            (None, None)
+        } else if matches!(self.current().kind, TokenKind::Ident(_))
+            && self
+                .tokens
+                .get(self.cursor + 1)
+                .is_some_and(|token| matches!(token.kind, TokenKind::Assign))
+        {
+            let binding = self.take_lower_identifier()?;
+            self.expect(
+                &TokenKind::Assign,
+                "expected '=' after when subject binding",
+            )?;
+            (Some(binding), Some(Box::new(self.parse_expression()?)))
         } else {
-            Some(Box::new(self.parse_expression()?))
+            (None, Some(Box::new(self.parse_expression()?)))
         };
         self.expect(&TokenKind::LBrace, "expected '{' after when subject")?;
         self.consume_separators();
@@ -354,7 +406,11 @@ impl Parser {
             }
         }
         self.expect(&TokenKind::RBrace, "expected '}' after when cases")?;
-        Ok(Expr::When { subject, cases })
+        Ok(Expr::When {
+            binding,
+            subject,
+            cases,
+        })
     }
 
     fn parse_when_case(&mut self) -> Result<WhenCase, ParseError> {
@@ -666,6 +722,8 @@ impl Parser {
                 Ok(expr)
             }
             TokenKind::LBracket => self.parse_list(),
+            TokenKind::LBrace => self.parse_map(),
+            TokenKind::Hash => self.parse_set(),
             TokenKind::If => {
                 self.cursor -= 1;
                 self.parse_if()
@@ -680,7 +738,8 @@ impl Parser {
             | TokenKind::Async
             | TokenKind::Await
             | TokenKind::Try
-            | TokenKind::Throw => Err(ParseError {
+            | TokenKind::Throw
+            | TokenKind::Enum => Err(ParseError {
                 message: "keyword is reserved for a future language feature".into(),
                 offset: token.span.start,
             }),
@@ -713,11 +772,57 @@ impl Parser {
         })
     }
 
+    fn parse_map(&mut self) -> Result<Expr, ParseError> {
+        self.consume_separators();
+        let mut entries = Vec::new();
+        while !self.at(&TokenKind::RBrace) {
+            let key = self.parse_expression()?;
+            self.expect(&TokenKind::Colon, "expected ':' between map key and value")?;
+            let value = self.parse_expression()?;
+            entries.push((key, value));
+            self.consume_separators();
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+            self.consume_separators();
+        }
+        self.expect(&TokenKind::RBrace, "expected '}' after map literal")?;
+        Ok(Expr::Map(entries))
+    }
+
+    fn parse_set(&mut self) -> Result<Expr, ParseError> {
+        self.expect(&TokenKind::LBrace, "expected '{' after '#'")?;
+        self.consume_separators();
+        let mut items = Vec::new();
+        while !self.at(&TokenKind::RBrace) {
+            items.push(self.parse_expression()?);
+            self.consume_separators();
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+            self.consume_separators();
+        }
+        self.expect(&TokenKind::RBrace, "expected '}' after set literal")?;
+        Ok(Expr::Set(items))
+    }
+
     fn parse_list(&mut self) -> Result<Expr, ParseError> {
         self.consume_separators();
         let mut items = Vec::new();
         if !self.at(&TokenKind::RBracket) {
             loop {
+                if self.eat(&TokenKind::Ellipsis) {
+                    let name = self.take_lower_identifier()?;
+                    items.push(Expr::Rest(name));
+                    self.consume_separators();
+                    if self.eat(&TokenKind::Comma) {
+                        self.consume_separators();
+                    }
+                    if !self.at(&TokenKind::RBracket) {
+                        return Err(self.error("rest pattern must be the final list element"));
+                    }
+                    break;
+                }
                 items.push(self.parse_expression()?);
                 self.consume_separators();
                 if !self.eat(&TokenKind::Comma) {
@@ -1049,6 +1154,8 @@ fn can_start_command_argument(kind: &TokenKind) -> bool {
             | TokenKind::Ident(_)
             | TokenKind::DataIdent(_)
             | TokenKind::LBracket
+            | TokenKind::LBrace
+            | TokenKind::Hash
             | TokenKind::Minus
             | TokenKind::Bang
             | TokenKind::If

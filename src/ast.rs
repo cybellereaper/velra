@@ -47,6 +47,7 @@ pub enum Stmt {
     },
     Function(FunctionDecl),
     Data(DataDecl),
+    Enum(EnumDecl),
     Expr(Expr),
     Pub(Box<Stmt>),
 }
@@ -78,6 +79,18 @@ pub struct DataDecl {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct EnumDecl {
+    pub name: String,
+    pub variants: Vec<EnumVariantDecl>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumVariantDecl {
+    pub name: String,
+    pub params: Vec<Param>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Block {
     pub statements: Vec<Stmt>,
 }
@@ -91,6 +104,9 @@ pub enum Expr {
     String(String),
     Ident(String),
     List(Vec<Expr>),
+    Map(Vec<(Expr, Expr)>),
+    Set(Vec<Expr>),
+    Rest(String),
     Unary {
         op: UnaryOp,
         expr: Box<Expr>,
@@ -126,6 +142,7 @@ pub enum Expr {
         else_branch: Option<ElseBranch>,
     },
     When {
+        binding: Option<String>,
         subject: Option<Box<Expr>>,
         cases: Vec<WhenCase>,
     },
