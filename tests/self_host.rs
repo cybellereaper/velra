@@ -19,7 +19,13 @@ fn invoke_compiler(mut program: Program, source: &str) -> String {
 fn compiled_artifacts_execute() {
     let artifact = compile("answer = 40 + 2\nanswer").unwrap();
     let program = load_artifact(&artifact).unwrap();
-    assert_eq!(Interpreter::new().eval_program(&program).unwrap().to_string(), "42");
+    assert_eq!(
+        Interpreter::new()
+            .eval_program(&program)
+            .unwrap()
+            .to_string(),
+        "42"
+    );
 }
 
 #[test]
