@@ -52,6 +52,42 @@ decode_escape(ch) {
     return ch
 }
 
+scan_comment_end(source, index) {
+    if index >= len(source) { return index }
+    if source[index] == "\n" { return index }
+    return scan_comment_end(source, index + 1)
+}
+
+scan_ident_end(source, index) {
+    if index >= len(source) { return index }
+    if !is_ident_continue(source[index]) { return index }
+    return scan_ident_end(source, index + 1)
+}
+
+scan_number(source, index, dot) {
+    if index >= len(source) { return [index, dot] }
+    current = source[index]
+    if is_digit(current) { return scan_number(source, index + 1, dot) }
+    if current == "." && !dot && index + 1 < len(source) && is_digit(source[index + 1]) {
+        return scan_number(source, index + 1, true)
+    }
+    return [index, dot]
+}
+
+scan_string(source, index, value, escaped) {
+    if index >= len(source) {
+        assert(false, "unterminated string literal")
+        return [value, index]
+    }
+    current = source[index]
+    if escaped {
+        return scan_string(source, index + 1, value + decode_escape(current), false)
+    }
+    if current == "\\" { return scan_string(source, index + 1, value, true) }
+    if current == "\"" { return [value, index + 1] }
+    return scan_string(source, index + 1, value + current, false)
+}
+
 lex(source) {
     var result = []
     var index = 0
@@ -68,73 +104,23 @@ lex(source) {
                 push(result, Token("sep", "\n"))
                 index = index + 1
             } else if ch == "/" && next == "/" {
-                var end = length
-                var found = false
-                for scan in range(index + 2, length) {
-                    if !found && source[scan] == "\n" {
-                        end = scan
-                        found = true
-                    }
-                }
-                index = end
+                index = scan_comment_end(source, index + 2)
             } else if is_digit(ch) {
-                var end = index + 1
-                var done = false
-                var dot = false
-                for scan in range(index + 1, length) {
-                    if !done {
-                        current = source[scan]
-                        if is_digit(current) {
-                            end = scan + 1
-                        } else if current == "." && !dot && scan + 1 < length && is_digit(source[scan + 1]) {
-                            dot = true
-                            end = scan + 1
-                        } else {
-                            done = true
-                        }
-                    }
-                }
+                scan = scan_number(source, index + 1, false)
+                end = scan[0]
+                dot = scan[1]
                 text = slice(source, index, end)
                 kind = if dot { "float" } else { "int" }
                 push(result, Token(kind, text))
                 index = end
             } else if ch == "\"" {
-                var value = ""
-                var end = length
-                var done = false
-                var escaped = false
-                for scan in range(index + 1, length) {
-                    if !done {
-                        current = source[scan]
-                        if escaped {
-                            value = value + decode_escape(current)
-                            escaped = false
-                        } else if current == "\\" {
-                            escaped = true
-                        } else if current == "\"" {
-                            end = scan + 1
-                            done = true
-                        } else {
-                            value = value + current
-                        }
-                    }
-                }
-                assert(done, "unterminated string literal")
+                scan = scan_string(source, index + 1, "", false)
+                value = scan[0]
+                end = scan[1]
                 push(result, Token("string", value))
                 index = end
             } else if is_ident_start(ch) {
-                var end = index + 1
-                var done = false
-                for scan in range(index + 1, length) {
-                    if !done {
-                        current = source[scan]
-                        if is_ident_continue(current) {
-                            end = scan + 1
-                        } else {
-                            done = true
-                        }
-                    }
-                }
+                end = scan_ident_end(source, index + 1)
                 text = slice(source, index, end)
                 keyword = keyword_kind(text)
                 if keyword != null {
@@ -223,11 +209,11 @@ expect(kind) {
 }
 
 consume_separators() {
-    for _ in range(len(parse_tokens)) {
-        if at("sep") {
-            parse_cursor = parse_cursor + 1
-        }
+    if at("sep") {
+        parse_cursor = parse_cursor + 1
+        return consume_separators()
     }
+    return null
 }
 
 take_name() {
@@ -237,22 +223,19 @@ take_name() {
     return text
 }
 
-matching_paren(start) {
-    var depth = 0
-    var result = -1
-    for index in range(start, len(parse_tokens)) {
-        if result == -1 {
-            kind = kind_at(index)
-            if kind == "(" {
-                depth = depth + 1
-            } else if kind == ")" {
-                depth = depth - 1
-                if depth == 0 { result = index }
-            }
-        }
+matching_paren_from(index, depth) {
+    if index >= len(parse_tokens) { return -1 }
+    kind = kind_at(index)
+    if kind == "(" { return matching_paren_from(index + 1, depth + 1) }
+    if kind == ")" {
+        next_depth = depth - 1
+        if next_depth == 0 { return index }
+        return matching_paren_from(index + 1, next_depth)
     }
-    return result
+    return matching_paren_from(index + 1, depth)
 }
+
+matching_paren(start) => matching_paren_from(start, 0)
 
 looks_like_function_decl() {
     if !at("ident") || kind_at(parse_cursor + 1) != "(" { return false }
@@ -280,47 +263,38 @@ parse_type_name() {
     return name
 }
 
+parse_params_tail(output) {
+    if at(")") { return output }
+    name = take_name()
+    var type_name = null
+    if eat(":") { type_name = parse_type_name() }
+    next_output = output + " (param " + quote(name) + " " + optional_string(type_name) + ")"
+    consume_separators()
+    if eat(",") {
+        consume_separators()
+        return parse_params_tail(next_output)
+    }
+    return next_output
+}
+
 parse_params() {
     expect("(")
     consume_separators()
-    var output = "(params"
-    var done = false
-    for _ in range(len(parse_tokens)) {
-        if !done {
-            if at(")") {
-                done = true
-            } else {
-                name = take_name()
-                var type_name = null
-                if eat(":") { type_name = parse_type_name() }
-                output = output + " (param " + quote(name) + " " + optional_string(type_name) + ")"
-                consume_separators()
-                if eat(",") {
-                    consume_separators()
-                } else {
-                    done = true
-                }
-            }
-        }
-    }
+    output = parse_params_tail("(params")
     expect(")")
     return output + ")"
 }
 
+parse_program_tail(output) {
+    if at("eof") { return output }
+    next_output = output + " " + parse_statement()
+    if !at("eof") { consume_separators() }
+    return parse_program_tail(next_output)
+}
+
 parse_program() {
     consume_separators()
-    var output = "(program"
-    var done = false
-    for _ in range(len(parse_tokens)) {
-        if !done {
-            if at("eof") {
-                done = true
-            } else {
-                output = output + " " + parse_statement()
-                if !at("eof") { consume_separators() }
-            }
-        }
-    }
+    output = parse_program_tail("(program")
     expect("eof")
     return output + ")"
 }
@@ -343,13 +317,12 @@ parse_statement() {
     return "(expr " + target + ")"
 }
 
-parse_use() {
-    var output = "(use " + quote(take_name())
-    for _ in range(len(parse_tokens)) {
-        if eat(".") { output = output + " " + quote(take_name()) }
-    }
-    return output + ")"
+parse_use_tail(output) {
+    if eat(".") { return parse_use_tail(output + " " + quote(take_name())) }
+    return output
 }
+
+parse_use() => parse_use_tail("(use " + quote(take_name())) + ")"
 
 parse_var() {
     name = take_name()
@@ -382,44 +355,36 @@ parse_function() {
     return "(function " + quote(name) + " " + params + " (body-block " + parse_block() + "))"
 }
 
+parse_data_fields(computed) {
+    if at("}") { return computed }
+    field = take_name()
+    assert(eat("=") || eat("=>"), "expected computed field")
+    next_computed = computed + " (field " + quote(field) + " " + parse_expression() + ")"
+    if !at("}") { consume_separators() }
+    return parse_data_fields(next_computed)
+}
+
 parse_data() {
     name = expect("data-ident")
     params = parse_params()
     expect("{")
     consume_separators()
-    var computed = "(computed"
-    var done = false
-    for _ in range(len(parse_tokens)) {
-        if !done {
-            if at("}") {
-                done = true
-            } else {
-                field = take_name()
-                assert(eat("=") || eat("=>"), "expected computed field")
-                computed = computed + " (field " + quote(field) + " " + parse_expression() + ")"
-                if !at("}") { consume_separators() }
-            }
-        }
-    }
+    computed = parse_data_fields("(computed")
     expect("}")
     return "(data " + quote(name) + " " + params + " " + computed + "))"
+}
+
+parse_block_tail(output) {
+    if at("}") { return output }
+    next_output = output + " " + parse_statement()
+    if !at("}") { consume_separators() }
+    return parse_block_tail(next_output)
 }
 
 parse_block() {
     expect("{")
     consume_separators()
-    var output = "(block"
-    var done = false
-    for _ in range(len(parse_tokens)) {
-        if !done {
-            if at("}") {
-                done = true
-            } else {
-                output = output + " " + parse_statement()
-                if !at("}") { consume_separators() }
-            }
-        }
-    }
+    output = parse_block_tail("(block")
     expect("}")
     return output + ")"
 }
@@ -444,103 +409,61 @@ binary(left, op, right) => "(binary " + op + " " + left + " " + right + ")"
 
 parse_expression() => parse_elvis()
 
-parse_elvis() {
-    var expr = parse_or()
-    for _ in range(len(parse_tokens)) {
-        if eat("?:") { expr = binary(expr, "elvis", parse_or()) }
-    }
+parse_elvis_tail(expr) {
+    if eat("?:") { return parse_elvis_tail(binary(expr, "elvis", parse_or())) }
     return expr
 }
 
-parse_or() {
-    var expr = parse_and()
-    for _ in range(len(parse_tokens)) {
-        if eat("||") { expr = binary(expr, "or", parse_and()) }
-    }
+parse_elvis() => parse_elvis_tail(parse_or())
+
+parse_or_tail(expr) {
+    if eat("||") { return parse_or_tail(binary(expr, "or", parse_and())) }
     return expr
 }
 
-parse_and() {
-    var expr = parse_equality()
-    for _ in range(len(parse_tokens)) {
-        if eat("&&") { expr = binary(expr, "and", parse_equality()) }
-    }
+parse_or() => parse_or_tail(parse_and())
+
+parse_and_tail(expr) {
+    if eat("&&") { return parse_and_tail(binary(expr, "and", parse_equality())) }
     return expr
 }
 
-parse_equality() {
-    var expr = parse_comparison()
-    var done = false
-    for _ in range(len(parse_tokens)) {
-        if !done {
-            if eat("==") {
-                expr = binary(expr, "equal", parse_comparison())
-            } else if eat("!=") {
-                expr = binary(expr, "not-equal", parse_comparison())
-            } else {
-                done = true
-            }
-        }
-    }
+parse_and() => parse_and_tail(parse_equality())
+
+parse_equality_tail(expr) {
+    if eat("==") { return parse_equality_tail(binary(expr, "equal", parse_comparison())) }
+    if eat("!=") { return parse_equality_tail(binary(expr, "not-equal", parse_comparison())) }
     return expr
 }
 
-parse_comparison() {
-    var expr = parse_additive()
-    var done = false
-    for _ in range(len(parse_tokens)) {
-        if !done {
-            if eat("<") {
-                expr = binary(expr, "less", parse_additive())
-            } else if eat("<=") {
-                expr = binary(expr, "less-equal", parse_additive())
-            } else if eat(">") {
-                expr = binary(expr, "greater", parse_additive())
-            } else if eat(">=") {
-                expr = binary(expr, "greater-equal", parse_additive())
-            } else {
-                done = true
-            }
-        }
-    }
+parse_equality() => parse_equality_tail(parse_comparison())
+
+parse_comparison_tail(expr) {
+    if eat("<") { return parse_comparison_tail(binary(expr, "less", parse_additive())) }
+    if eat("<=") { return parse_comparison_tail(binary(expr, "less-equal", parse_additive())) }
+    if eat(">") { return parse_comparison_tail(binary(expr, "greater", parse_additive())) }
+    if eat(">=") { return parse_comparison_tail(binary(expr, "greater-equal", parse_additive())) }
     return expr
 }
 
-parse_additive() {
-    var expr = parse_multiplicative()
-    var done = false
-    for _ in range(len(parse_tokens)) {
-        if !done {
-            if eat("+") {
-                expr = binary(expr, "add", parse_multiplicative())
-            } else if eat("-") {
-                expr = binary(expr, "subtract", parse_multiplicative())
-            } else {
-                done = true
-            }
-        }
-    }
+parse_comparison() => parse_comparison_tail(parse_additive())
+
+parse_additive_tail(expr) {
+    if eat("+") { return parse_additive_tail(binary(expr, "add", parse_multiplicative())) }
+    if eat("-") { return parse_additive_tail(binary(expr, "subtract", parse_multiplicative())) }
     return expr
 }
 
-parse_multiplicative() {
-    var expr = parse_unary()
-    var done = false
-    for _ in range(len(parse_tokens)) {
-        if !done {
-            if eat("*") {
-                expr = binary(expr, "multiply", parse_unary())
-            } else if eat("/") {
-                expr = binary(expr, "divide", parse_unary())
-            } else if eat("%") {
-                expr = binary(expr, "remainder", parse_unary())
-            } else {
-                done = true
-            }
-        }
-    }
+parse_additive() => parse_additive_tail(parse_multiplicative())
+
+parse_multiplicative_tail(expr) {
+    if eat("*") { return parse_multiplicative_tail(binary(expr, "multiply", parse_unary())) }
+    if eat("/") { return parse_multiplicative_tail(binary(expr, "divide", parse_unary())) }
+    if eat("%") { return parse_multiplicative_tail(binary(expr, "remainder", parse_unary())) }
     return expr
 }
+
+parse_multiplicative() => parse_multiplicative_tail(parse_unary())
 
 parse_unary() {
     if eat("-") { return "(unary negate " + parse_unary() + ")" }
@@ -548,46 +471,49 @@ parse_unary() {
     return parse_postfix()
 }
 
-parse_postfix() {
-    var expr = parse_primary()
-    var done = false
-    for _ in range(len(parse_tokens)) {
-        if !done {
-            if eat("(") {
-                consume_separators()
-                var args = "(args"
-                var args_done = false
-                for _ in range(len(parse_tokens)) {
-                    if !args_done {
-                        if at(")") {
-                            args_done = true
-                        } else {
-                            args = args + " " + parse_expression()
-                            consume_separators()
-                            if eat(",") {
-                                consume_separators()
-                            } else {
-                                args_done = true
-                            }
-                        }
-                    }
-                }
-                expect(")")
-                expr = "(call " + expr + " " + args + "))"
-            } else if eat(".") {
-                expr = "(member " + expr + " " + quote(take_name()) + " false)"
-            } else if eat("?.") {
-                expr = "(member " + expr + " " + quote(take_name()) + " true)"
-            } else if eat("[") {
-                index = parse_expression()
-                expect("]")
-                expr = "(index " + expr + " " + index + ")"
-            } else {
-                done = true
-            }
-        }
+parse_args_tail(args) {
+    if at(")") { return args }
+    next_args = args + " " + parse_expression()
+    consume_separators()
+    if eat(",") {
+        consume_separators()
+        return parse_args_tail(next_args)
+    }
+    return next_args
+}
+
+parse_postfix_tail(expr) {
+    if eat("(") {
+        consume_separators()
+        args = parse_args_tail("(args")
+        expect(")")
+        return parse_postfix_tail("(call " + expr + " " + args + "))")
+    }
+    if eat(".") {
+        return parse_postfix_tail("(member " + expr + " " + quote(take_name()) + " false)")
+    }
+    if eat("?.") {
+        return parse_postfix_tail("(member " + expr + " " + quote(take_name()) + " true)")
+    }
+    if eat("[") {
+        index = parse_expression()
+        expect("]")
+        return parse_postfix_tail("(index " + expr + " " + index + ")")
     }
     return expr
+}
+
+parse_postfix() => parse_postfix_tail(parse_primary())
+
+parse_list_tail(output) {
+    if at("]") { return output }
+    next_output = output + " " + parse_expression()
+    consume_separators()
+    if eat(",") {
+        consume_separators()
+        return parse_list_tail(next_output)
+    }
+    return next_output
 }
 
 parse_primary() {
@@ -619,24 +545,8 @@ parse_primary() {
         return expr
     }
     if eat("[") {
-        var output = "(list"
         consume_separators()
-        var done = false
-        for _ in range(len(parse_tokens)) {
-            if !done {
-                if at("]") {
-                    done = true
-                } else {
-                    output = output + " " + parse_expression()
-                    consume_separators()
-                    if eat(",") {
-                        consume_separators()
-                    } else {
-                        done = true
-                    }
-                }
-            }
-        }
+        output = parse_list_tail("(list")
         expect("]")
         return output + ")"
     }
