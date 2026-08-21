@@ -122,6 +122,7 @@ fn ensure_no_extra_args(mut args: impl Iterator<Item = String>) -> Result<(), St
 
 fn render_error(path: &str, source: &str, error: &Error) -> String {
     let (message, offset) = match error {
+        Error::Artifact(error) => (error.message.as_str(), error.offset),
         Error::Lex(error) => (error.message.as_str(), error.span.start),
         Error::Parse(error) => (error.message.as_str(), error.offset),
         Error::Runtime(error) => return format!("{path}: runtime error: {error}"),
