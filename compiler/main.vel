@@ -1,0 +1,569 @@
+Token(kind, text) {}
+
+var parse_tokens = []
+var parse_cursor = 0
+
+is_digit(ch) => ch >= "0" && ch <= "9"
+is_lower(ch) => ch >= "a" && ch <= "z"
+is_upper(ch) => ch >= "A" && ch <= "Z"
+is_letter(ch) => is_lower(ch) || is_upper(ch)
+is_ident_start(ch) => ch == "_" || is_letter(ch)
+is_ident_continue(ch) => is_ident_start(ch) || is_digit(ch)
+
+characters(text) {
+    var output = []
+    for ch in text { push(output, ch) }
+    return output
+}
+
+slice(text, start, end) {
+    var output = ""
+    for index in range(start, end) {
+        output = output + text[index]
+    }
+    return output
+}
+
+keyword_kind(text) {
+    if text == "true" { return "true" }
+    if text == "false" { return "false" }
+    if text == "null" { return "null" }
+    if text == "use" { return "use" }
+    if text == "pub" { return "pub" }
+    if text == "var" { return "var" }
+    if text == "if" { return "if" }
+    if text == "else" { return "else" }
+    if text == "for" { return "for" }
+    if text == "in" { return "in" }
+    if text == "when" { return "when" }
+    if text == "return" { return "return" }
+    if text == "object" { return "object" }
+    if text == "extend" { return "extend" }
+    if text == "shape" { return "shape" }
+    if text == "async" { return "async" }
+    if text == "await" { return "await" }
+    if text == "try" { return "try" }
+    if text == "throw" { return "throw" }
+    return null
+}
+
+decode_escape(ch) {
+    if ch == "n" { return "\n" }
+    if ch == "r" { return "\r" }
+    if ch == "t" { return "\t" }
+    if ch == "0" { return "\0" }
+    if ch == "\\" { return "\\" }
+    if ch == "\"" { return "\"" }
+    if ch == "$" { return "$" }
+    return ch
+}
+
+scan_comment_end(source, index) {
+    if index >= len(source) { return index }
+    if source[index] == "\n" { return index }
+    return scan_comment_end(source, index + 1)
+}
+
+scan_ident_end(source, index) {
+    if index >= len(source) { return index }
+    if !is_ident_continue(source[index]) { return index }
+    return scan_ident_end(source, index + 1)
+}
+
+scan_number(source, index, dot) {
+    if index >= len(source) { return [index, dot] }
+    current = source[index]
+    if is_digit(current) { return scan_number(source, index + 1, dot) }
+    if current == "." && !dot && index + 1 < len(source) && is_digit(source[index + 1]) {
+        return scan_number(source, index + 1, true)
+    }
+    return [index, dot]
+}
+
+scan_string(source, index, value, escaped) {
+    if index >= len(source) {
+        assert(false, "unterminated string literal")
+        return [value, index]
+    }
+    current = source[index]
+    if escaped {
+        return scan_string(source, index + 1, value + decode_escape(current), false)
+    }
+    if current == "\\" { return scan_string(source, index + 1, value, true) }
+    if current == "\"" { return [value, index + 1] }
+    return scan_string(source, index + 1, value + current, false)
+}
+
+lex(source) {
+    var result = []
+    chars = characters(source)
+    var index = 0
+    length = len(chars)
+
+    for step in range(length) {
+        if step == index {
+            ch = chars[index]
+            next = if index + 1 < length { chars[index + 1] } else { "" }
+
+            if ch == " " || ch == "\t" || ch == "\r" {
+                index = index + 1
+            } else if ch == "\n" {
+                push(result, Token("sep", "\n"))
+                index = index + 1
+            } else if ch == "/" && next == "/" {
+                index = scan_comment_end(chars, index + 2)
+            } else if is_digit(ch) {
+                scan = scan_number(chars, index + 1, false)
+                end = scan[0]
+                dot = scan[1]
+                text = slice(chars, index, end)
+                kind = if dot { "float" } else { "int" }
+                push(result, Token(kind, text))
+                index = end
+            } else if ch == "\"" {
+                scan = scan_string(chars, index + 1, "", false)
+                value = scan[0]
+                end = scan[1]
+                push(result, Token("string", value))
+                index = end
+            } else if is_ident_start(ch) {
+                end = scan_ident_end(chars, index + 1)
+                text = slice(chars, index, end)
+                keyword = keyword_kind(text)
+                if keyword != null {
+                    push(result, Token(keyword, text))
+                } else if is_upper(ch) {
+                    push(result, Token("data-ident", text))
+                } else {
+                    push(result, Token("ident", text))
+                }
+                index = end
+            } else {
+                pair = ch + next
+                if pair == "==" || pair == "!=" || pair == "<=" || pair == ">=" || pair == "&&" || pair == "||" || pair == "?." || pair == "?:" || pair == "=>" || pair == "->" {
+                    push(result, Token(pair, pair))
+                    index = index + 2
+                } else {
+                    valid = ch == "=" || ch == "+" || ch == "-" || ch == "*" || ch == "/" || ch == "%" || ch == "<" || ch == ">" || ch == "!" || ch == "." || ch == "," || ch == ":" || ch == ";" || ch == "?" || ch == "(" || ch == ")" || ch == "{" || ch == "}" || ch == "[" || ch == "]"
+                    assert(valid, "unexpected character in source")
+                    if ch == ";" {
+                        push(result, Token("sep", ch))
+                    } else {
+                        push(result, Token(ch, ch))
+                    }
+                    index = index + 1
+                }
+            }
+        }
+    }
+
+    push(result, Token("eof", ""))
+    return result
+}
+
+quote(value) {
+    var output = "\""
+    for ch in value {
+        if ch == "\n" {
+            output = output + "\\n"
+        } else if ch == "\r" {
+            output = output + "\\r"
+        } else if ch == "\t" {
+            output = output + "\\t"
+        } else if ch == "\0" {
+            output = output + "\\0"
+        } else if ch == "\"" {
+            output = output + "\\\""
+        } else if ch == "\\" {
+            output = output + "\\\\"
+        } else {
+            output = output + ch
+        }
+    }
+    return output + "\""
+}
+
+current_kind() {
+    if parse_cursor >= len(parse_tokens) { return "eof" }
+    return parse_tokens[parse_cursor].kind
+}
+
+current_text() {
+    if parse_cursor >= len(parse_tokens) { return "" }
+    return parse_tokens[parse_cursor].text
+}
+
+kind_at(index) {
+    if index < 0 || index >= len(parse_tokens) { return "eof" }
+    return parse_tokens[index].kind
+}
+
+at(kind) => current_kind() == kind
+
+eat(kind) {
+    if at(kind) {
+        parse_cursor = parse_cursor + 1
+        return true
+    }
+    return false
+}
+
+expect(kind) {
+    assert(at(kind), "unexpected token")
+    text = current_text()
+    parse_cursor = parse_cursor + 1
+    return text
+}
+
+consume_separators() {
+    if at("sep") {
+        parse_cursor = parse_cursor + 1
+        return consume_separators()
+    }
+    return null
+}
+
+take_name() {
+    assert(at("ident") || at("data-ident"), "expected name")
+    text = current_text()
+    parse_cursor = parse_cursor + 1
+    return text
+}
+
+matching_paren_from(index, depth) {
+    if index >= len(parse_tokens) { return -1 }
+    kind = kind_at(index)
+    if kind == "(" { return matching_paren_from(index + 1, depth + 1) }
+    if kind == ")" {
+        next_depth = depth - 1
+        if next_depth == 0 { return index }
+        return matching_paren_from(index + 1, next_depth)
+    }
+    return matching_paren_from(index + 1, depth)
+}
+
+matching_paren(start) => matching_paren_from(start, 0)
+
+looks_like_function_decl() {
+    if !at("ident") || kind_at(parse_cursor + 1) != "(" { return false }
+    close = matching_paren(parse_cursor + 1)
+    if close < 0 { return false }
+    next = kind_at(close + 1)
+    return next == "=>" || next == "{"
+}
+
+looks_like_data_decl() {
+    if !at("data-ident") || kind_at(parse_cursor + 1) != "(" { return false }
+    close = matching_paren(parse_cursor + 1)
+    if close < 0 { return false }
+    return kind_at(close + 1) == "{"
+}
+
+optional_string(value) {
+    if value == null { return "(none)" }
+    return "(some " + quote(value) + ")"
+}
+
+parse_type_name() {
+    name = take_name()
+    if eat("?") { return name + "?" }
+    return name
+}
+
+parse_params_tail(output) {
+    if at(")") { return output }
+    name = take_name()
+    var type_name = null
+    if eat(":") { type_name = parse_type_name() }
+    next_output = output + " (param " + quote(name) + " " + optional_string(type_name) + ")"
+    consume_separators()
+    if eat(",") {
+        consume_separators()
+        return parse_params_tail(next_output)
+    }
+    return next_output
+}
+
+parse_params() {
+    expect("(")
+    consume_separators()
+    output = parse_params_tail("(params")
+    expect(")")
+    return output + ")"
+}
+
+parse_program_tail(output) {
+    if at("eof") { return output }
+    next_output = output + " " + parse_statement()
+    if !at("eof") { consume_separators() }
+    return parse_program_tail(next_output)
+}
+
+parse_program() {
+    consume_separators()
+    output = parse_program_tail("(program")
+    expect("eof")
+    return output + ")"
+}
+
+parse_statement() {
+    if eat("pub") { return "(pub " + parse_statement() + ")" }
+    if eat("use") { return parse_use() }
+    if eat("var") { return parse_var() }
+    if eat("return") { return parse_return() }
+    if eat("for") { return parse_for() }
+    if at("if") { return "(expr " + parse_if() + ")" }
+    if looks_like_data_decl() { return parse_data() }
+    if looks_like_function_decl() { return parse_function() }
+
+    target = parse_expression()
+    if eat("=") {
+        value = parse_expression()
+        return "(assign " + target + " " + value + ")"
+    }
+    return "(expr " + target + ")"
+}
+
+parse_use_tail(output) {
+    if eat(".") { return parse_use_tail(output + " " + quote(take_name())) }
+    return output
+}
+
+parse_use() => parse_use_tail("(use " + quote(take_name())) + ")"
+
+parse_var() {
+    name = take_name()
+    var type_name = null
+    if eat(":") { type_name = parse_type_name() }
+    expect("=")
+    value = parse_expression()
+    return "(var " + quote(name) + " " + optional_string(type_name) + " " + value + ")"
+}
+
+parse_return() {
+    if at("sep") || at("}") || at("eof") { return "(return (none))" }
+    return "(return (some " + parse_expression() + "))"
+}
+
+parse_for() {
+    name = take_name()
+    expect("in")
+    iterable = parse_expression()
+    body = parse_block()
+    return "(for " + quote(name) + " " + iterable + " " + body + ")"
+}
+
+parse_function() {
+    name = expect("ident")
+    params = parse_params()
+    if eat("=>") {
+        return "(function " + quote(name) + " " + params + " (body-expr " + parse_expression() + "))"
+    }
+    return "(function " + quote(name) + " " + params + " (body-block " + parse_block() + "))"
+}
+
+parse_data_fields(computed) {
+    if at("}") { return computed }
+    field = take_name()
+    assert(eat("=") || eat("=>"), "expected computed field")
+    next_computed = computed + " (field " + quote(field) + " " + parse_expression() + ")"
+    if !at("}") { consume_separators() }
+    return parse_data_fields(next_computed)
+}
+
+parse_data() {
+    name = expect("data-ident")
+    params = parse_params()
+    expect("{")
+    consume_separators()
+    computed = parse_data_fields("(computed")
+    expect("}")
+    return "(data " + quote(name) + " " + params + " " + computed + "))"
+}
+
+parse_block_tail(output) {
+    if at("}") { return output }
+    next_output = output + " " + parse_statement()
+    if !at("}") { consume_separators() }
+    return parse_block_tail(next_output)
+}
+
+parse_block() {
+    expect("{")
+    consume_separators()
+    output = parse_block_tail("(block")
+    expect("}")
+    return output + ")"
+}
+
+parse_if() {
+    expect("if")
+    condition = parse_expression()
+    then_branch = parse_block()
+    consume_separators()
+    var else_branch = "(none)"
+    if eat("else") {
+        if at("if") {
+            else_branch = "(else-if " + parse_if() + ")"
+        } else {
+            else_branch = "(else-block " + parse_block() + ")"
+        }
+    }
+    return "(if " + condition + " " + then_branch + " " + else_branch + ")"
+}
+
+binary(left, op, right) => "(binary " + op + " " + left + " " + right + ")"
+
+parse_expression() => parse_elvis()
+
+parse_elvis_tail(expr) {
+    if eat("?:") { return parse_elvis_tail(binary(expr, "elvis", parse_or())) }
+    return expr
+}
+
+parse_elvis() => parse_elvis_tail(parse_or())
+
+parse_or_tail(expr) {
+    if eat("||") { return parse_or_tail(binary(expr, "or", parse_and())) }
+    return expr
+}
+
+parse_or() => parse_or_tail(parse_and())
+
+parse_and_tail(expr) {
+    if eat("&&") { return parse_and_tail(binary(expr, "and", parse_equality())) }
+    return expr
+}
+
+parse_and() => parse_and_tail(parse_equality())
+
+parse_equality_tail(expr) {
+    if eat("==") { return parse_equality_tail(binary(expr, "equal", parse_comparison())) }
+    if eat("!=") { return parse_equality_tail(binary(expr, "not-equal", parse_comparison())) }
+    return expr
+}
+
+parse_equality() => parse_equality_tail(parse_comparison())
+
+parse_comparison_tail(expr) {
+    if eat("<") { return parse_comparison_tail(binary(expr, "less", parse_additive())) }
+    if eat("<=") { return parse_comparison_tail(binary(expr, "less-equal", parse_additive())) }
+    if eat(">") { return parse_comparison_tail(binary(expr, "greater", parse_additive())) }
+    if eat(">=") { return parse_comparison_tail(binary(expr, "greater-equal", parse_additive())) }
+    return expr
+}
+
+parse_comparison() => parse_comparison_tail(parse_additive())
+
+parse_additive_tail(expr) {
+    if eat("+") { return parse_additive_tail(binary(expr, "add", parse_multiplicative())) }
+    if eat("-") { return parse_additive_tail(binary(expr, "subtract", parse_multiplicative())) }
+    return expr
+}
+
+parse_additive() => parse_additive_tail(parse_multiplicative())
+
+parse_multiplicative_tail(expr) {
+    if eat("*") { return parse_multiplicative_tail(binary(expr, "multiply", parse_unary())) }
+    if eat("/") { return parse_multiplicative_tail(binary(expr, "divide", parse_unary())) }
+    if eat("%") { return parse_multiplicative_tail(binary(expr, "remainder", parse_unary())) }
+    return expr
+}
+
+parse_multiplicative() => parse_multiplicative_tail(parse_unary())
+
+parse_unary() {
+    if eat("-") { return "(unary negate " + parse_unary() + ")" }
+    if eat("!") { return "(unary not " + parse_unary() + ")" }
+    return parse_postfix()
+}
+
+parse_args_tail(args) {
+    if at(")") { return args }
+    next_args = args + " " + parse_expression()
+    consume_separators()
+    if eat(",") {
+        consume_separators()
+        return parse_args_tail(next_args)
+    }
+    return next_args
+}
+
+parse_postfix_tail(expr) {
+    if eat("(") {
+        consume_separators()
+        args = parse_args_tail("(args")
+        expect(")")
+        return parse_postfix_tail("(call " + expr + " " + args + "))")
+    }
+    if eat(".") {
+        return parse_postfix_tail("(member " + expr + " " + quote(take_name()) + " false)")
+    }
+    if eat("?.") {
+        return parse_postfix_tail("(member " + expr + " " + quote(take_name()) + " true)")
+    }
+    if eat("[") {
+        index = parse_expression()
+        expect("]")
+        return parse_postfix_tail("(index " + expr + " " + index + ")")
+    }
+    return expr
+}
+
+parse_postfix() => parse_postfix_tail(parse_primary())
+
+parse_list_tail(output) {
+    if at("]") { return output }
+    next_output = output + " " + parse_expression()
+    consume_separators()
+    if eat(",") {
+        consume_separators()
+        return parse_list_tail(next_output)
+    }
+    return next_output
+}
+
+parse_primary() {
+    if at("int") {
+        value = current_text()
+        parse_cursor = parse_cursor + 1
+        return "(int " + value + ")"
+    }
+    if at("float") {
+        value = current_text()
+        parse_cursor = parse_cursor + 1
+        return "(float " + value + ")"
+    }
+    if at("string") {
+        value = current_text()
+        parse_cursor = parse_cursor + 1
+        return "(string " + quote(value) + ")"
+    }
+    if eat("true") { return "(bool true)" }
+    if eat("false") { return "(bool false)" }
+    if eat("null") { return "null" }
+    if at("ident") || at("data-ident") {
+        name = take_name()
+        return "(ident " + quote(name) + ")"
+    }
+    if eat("(") {
+        expr = parse_expression()
+        expect(")")
+        return expr
+    }
+    if eat("[") {
+        consume_separators()
+        output = parse_list_tail("(list")
+        expect("]")
+        return output + ")"
+    }
+    if at("if") { return parse_if() }
+    assert(false, "expected expression")
+    return "null"
+}
+
+compile(source) {
+    parse_tokens = lex(source)
+    parse_cursor = 0
+    return "VELRA-AST-1\n" + parse_program()
+}

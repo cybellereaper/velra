@@ -1,5 +1,5 @@
 use crate::ast::{
-    BinaryOp, Block, DataDecl, ElseBranch, Expr, FunctionBody, FunctionDecl, Program, Stmt,
+    BinaryOp, Block, DataDecl, ElseBranch, Expr, FunctionBody, FunctionDecl, Param, Program, Stmt,
     UnaryOp, WhenBody,
 };
 use std::cell::RefCell;
@@ -12,7 +12,7 @@ pub type RuntimeResult<T> = Result<T, RuntimeError>;
 type EnvRef = Rc<RefCell<Environment>>;
 type NativeFn = fn(Vec<Value>) -> RuntimeResult<Value>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct RuntimeError {
     pub message: String,
 }
@@ -43,8 +43,8 @@ pub enum Value {
     List(Rc<RefCell<Vec<Value>>>),
     Record(Rc<Record>),
     Function(Rc<UserFunction>),
-    Native(NativeFunction),
     Constructor(Rc<DataType>),
+    Native(NativeFunction),
 }
 
 impl Value {
@@ -57,8 +57,9 @@ impl Value {
             Self::String(_) => "String",
             Self::List(_) => "List",
             Self::Record(record) => &record.name,
-            Self::Function(_) | Self::Native(_) => "Function",
-            Self::Constructor(data) => &data.name,
+            Self::Function(_) => "Function",
+            Self::Constructor(_) => "Type",
+            Self::Native(_) => "Function",
         }
     }
 
@@ -66,7 +67,7 @@ impl Value {
         match self {
             Self::Bool(value) => Ok(*value),
             _ => Err(RuntimeError::new(format!(
-                "{context} requires Bool, got {}",
+                "{context} expects Bool, got {}",
                 self.type_name()
             ))),
         }
@@ -75,7 +76,18 @@ impl Value {
 
 impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{self}")
+        match self {
+            Self::Null => f.write_str("Null"),
+            Self::Bool(value) => f.debug_tuple("Bool").field(value).finish(),
+            Self::Int(value) => f.debug_tuple("Int").field(value).finish(),
+            Self::Float(value) => f.debug_tuple("Float").field(value).finish(),
+            Self::String(value) => f.debug_tuple("String").field(value).finish(),
+            Self::List(values) => f.debug_tuple("List").field(&*values.borrow()).finish(),
+            Self::Record(record) => f.debug_tuple("Record").field(record).finish(),
+            Self::Function(function) => f.debug_tuple("Function").field(&function.name).finish(),
+            Self::Constructor(data) => f.debug_tuple("Constructor").field(&data.name).finish(),
+            Self::Native(function) => f.debug_tuple("Native").field(&function.name).finish(),
+        }
     }
 }
 
@@ -103,27 +115,27 @@ impl fmt::Display for Value {
                     if index > 0 {
                         f.write_str(", ")?;
                     }
-                    write!(f, "{name}: {value}")?;
+                    write!(f, "{name}={value}")?;
                 }
                 f.write_str(")")
             }
             Self::Function(function) => write!(f, "<function {}>", function.name),
+            Self::Constructor(data) => write!(f, "<type {}>", data.name),
             Self::Native(function) => write!(f, "<native {}>", function.name),
-            Self::Constructor(data) => write!(f, "<data {}>", data.name),
         }
     }
 }
 
-#[derive(Clone)]
-pub struct NativeFunction {
-    name: &'static str,
-    call: NativeFn,
+#[derive(Debug)]
+pub struct Record {
+    pub name: String,
+    pub fields: BTreeMap<String, Value>,
 }
 
 #[derive(Clone)]
 pub struct UserFunction {
     name: String,
-    params: Vec<crate::ast::Param>,
+    params: Vec<Param>,
     body: FunctionBody,
     closure: EnvRef,
 }
@@ -131,15 +143,15 @@ pub struct UserFunction {
 #[derive(Clone)]
 pub struct DataType {
     name: String,
-    params: Vec<crate::ast::Param>,
+    params: Vec<Param>,
     computed: Vec<(String, Expr)>,
     closure: EnvRef,
 }
 
-#[derive(Clone)]
-pub struct Record {
-    name: String,
-    fields: BTreeMap<String, Value>,
+#[derive(Clone, Copy)]
+pub struct NativeFunction {
+    name: &'static str,
+    call: NativeFn,
 }
 
 #[derive(Clone)]
@@ -148,7 +160,7 @@ struct Binding {
     mutable: bool,
 }
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct Environment {
     values: HashMap<String, Binding>,
     parent: Option<EnvRef>,
@@ -451,20 +463,20 @@ impl Interpreter {
                     Ok(left)
                 }
             }
-            BinaryOp::And => {
-                if !left.expect_bool("left operand of '&&'")? {
-                    Ok(Value::Bool(false))
-                } else {
-                    let right = self.eval_expr(right, env)?;
-                    Ok(Value::Bool(right.expect_bool("right operand of '&&'")?))
-                }
-            }
             BinaryOp::Or => {
-                if left.expect_bool("left operand of '||'")? {
+                if left.expect_bool("'||' left operand")? {
                     Ok(Value::Bool(true))
                 } else {
                     let right = self.eval_expr(right, env)?;
-                    Ok(Value::Bool(right.expect_bool("right operand of '||'")?))
+                    Ok(Value::Bool(right.expect_bool("'||' right operand")?))
+                }
+            }
+            BinaryOp::And => {
+                if !left.expect_bool("'&&' left operand")? {
+                    Ok(Value::Bool(false))
+                } else {
+                    let right = self.eval_expr(right, env)?;
+                    Ok(Value::Bool(right.expect_bool("'&&' right operand")?))
                 }
             }
             _ => {
@@ -516,9 +528,11 @@ impl Interpreter {
                     fields,
                 })))
             }
-            value => {
-                Err(RuntimeError::new(format!("{} is not callable", value.type_name())).into())
-            }
+            value => Err(RuntimeError::new(format!(
+                "{} value {value:?} is not callable",
+                value.type_name()
+            ))
+            .into()),
         }
     }
 }
