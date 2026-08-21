@@ -1,0 +1,87 @@
+name: Self-host parser fix
+
+on:
+  push:
+    branches: [self-hosted-compiler]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: self-hosted-compiler
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Patch parser adjacency and regression test
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/parser.rs')
+          text = path.read_text()
+          old = '''    fn looks_like_command_call(&self) -> bool {
+              if !self.current().kind.is_identifier() {
+                  return false;
+              }
+              self.tokens
+                  .get(self.cursor + 1)
+                  .is_some_and(|token| can_start_command_argument(&token.kind))
+          }
+          '''
+          new = '''    fn looks_like_command_call(&self) -> bool {
+              if !self.current().kind.is_identifier() {
+                  return false;
+              }
+              let Some(next) = self.tokens.get(self.cursor + 1) else {
+                  return false;
+              };
+              self.current().span.end < next.span.start && can_start_command_argument(&next.kind)
+          }
+          '''
+          if old not in text:
+              raise SystemExit('looks_like_command_call block did not match expected source')
+          text = text.replace(old, new, 1)
+
+          needle = '''    #[test]
+              fn parses_command_style_calls() {
+                  let program = parse_ok("print \\\"hello\\\", 42");
+                  assert!(matches!(
+                      program.statements[0],
+                      Stmt::Expr(Expr::Call { .. })
+                  ));
+              }
+          '''
+          replacement = needle + '''
+              #[test]
+              fn adjacent_indexing_is_not_a_command_call() {
+                  let program = parse_ok("value = [1]\\nvalue[0]");
+                  assert!(matches!(
+                      program.statements[1],
+                      Stmt::Expr(Expr::Index { .. })
+                  ));
+              }
+          '''
+          if needle not in text:
+              raise SystemExit('parser test insertion point did not match expected source')
+          path.write_text(text.replace(needle, replacement, 1))
+          PY
+          cargo fmt --all
+          cargo check --all-targets
+          cargo clippy --all-targets -- -D warnings
+          cargo test --all-targets
+      - name: Commit verified fix and remove one-shot workflow
+        shell: bash
+        run: |
+          rm .github/workflows/selfhost-parser-fix.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -- src/parser.rs .github/workflows/selfhost-parser-fix.yml
+          git commit -m "fix: disambiguate command calls from postfix indexing"
+          git push origin HEAD:self-hosted-compiler
