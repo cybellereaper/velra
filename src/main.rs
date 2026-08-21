@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::{self, Write};
 use std::process::ExitCode;
-use velra::{check, Error, Interpreter, Value};
+use velra::{check, compile, load_artifact, Error, Interpreter, Value};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -45,6 +45,23 @@ fn run_cli() -> Result<(), String> {
             ensure_no_extra_args(args)?;
             check_file(&path)
         }
+        "compile" => {
+            let input = args
+                .next()
+                .ok_or_else(|| "usage: velra compile <input.vel> <output.velc>".to_owned())?;
+            let output = args
+                .next()
+                .ok_or_else(|| "usage: velra compile <input.vel> <output.velc>".to_owned())?;
+            ensure_no_extra_args(args)?;
+            compile_file(&input, &output)
+        }
+        "exec" => {
+            let path = args
+                .next()
+                .ok_or_else(|| "usage: velra exec <file.velc>".to_owned())?;
+            ensure_no_extra_args(args)?;
+            exec_file(&path)
+        }
         "repl" => {
             ensure_no_extra_args(args)?;
             repl()
@@ -60,10 +77,7 @@ fn run_cli() -> Result<(), String> {
 fn run_file(path: &str) -> Result<(), String> {
     let source = read_source(path)?;
     let program = check(&source).map_err(|error| render_error(path, &source, &error))?;
-    Interpreter::new()
-        .eval_program(&program)
-        .map(|_| ())
-        .map_err(|error| format!("{path}: runtime error: {error}"))
+    execute(path, program)
 }
 
 fn check_file(path: &str) -> Result<(), String> {
@@ -71,6 +85,25 @@ fn check_file(path: &str) -> Result<(), String> {
     check(&source).map_err(|error| render_error(path, &source, &error))?;
     println!("{path}: ok");
     Ok(())
+}
+
+fn compile_file(input: &str, output: &str) -> Result<(), String> {
+    let source = read_source(input)?;
+    let artifact = compile(&source).map_err(|error| render_error(input, &source, &error))?;
+    fs::write(output, artifact).map_err(|error| format!("failed to write '{output}': {error}"))
+}
+
+fn exec_file(path: &str) -> Result<(), String> {
+    let artifact = read_source(path)?;
+    let program = load_artifact(&artifact).map_err(|error| render_error(path, &artifact, &error))?;
+    execute(path, program)
+}
+
+fn execute(path: &str, program: velra::ast::Program) -> Result<(), String> {
+    Interpreter::new()
+        .eval_program(&program)
+        .map(|_| ())
+        .map_err(|error| format!("{path}: runtime error: {error}"))
 }
 
 fn repl() -> Result<(), String> {
@@ -122,6 +155,7 @@ fn ensure_no_extra_args(mut args: impl Iterator<Item = String>) -> Result<(), St
 
 fn render_error(path: &str, source: &str, error: &Error) -> String {
     let (message, offset) = match error {
+        Error::Artifact(error) => (error.message.as_str(), error.offset),
         Error::Lex(error) => (error.message.as_str(), error.span.start),
         Error::Parse(error) => (error.message.as_str(), error.offset),
         Error::Runtime(error) => return format!("{path}: runtime error: {error}"),
@@ -143,7 +177,7 @@ fn line_column(source: &str, offset: usize) -> (usize, usize) {
 fn print_help() {
     println!(
         "Velra {VERSION}\n\n\
-Usage:\n  velra <file.vel>\n  velra run <file.vel>\n  velra check <file.vel>\n  velra repl\n\n\
-Commands:\n  run      Execute a Velra source file\n  check    Lex and parse without executing\n  repl     Start an interactive session\n"
+Usage:\n  velra <file.vel>\n  velra run <file.vel>\n  velra check <file.vel>\n  velra compile <input.vel> <output.velc>\n  velra exec <file.velc>\n  velra repl\n\n\
+Commands:\n  run      Execute a Velra source file\n  check    Lex and parse without executing\n  compile  Compile source to a Velra artifact\n  exec     Execute a compiled Velra artifact\n  repl     Start an interactive session\n"
     );
 }
