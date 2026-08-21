@@ -79,6 +79,19 @@ fn compiled_compiler_helpers_run() {
 }
 
 #[test]
+fn compiled_compiler_lexer_accepts_symbols() {
+    let (_, compiler) = compiler_program();
+    let mut interpreter = Interpreter::new();
+    interpreter.eval_program(&compiler).unwrap();
+
+    for input in ["(", ",", ")", "{", "}", "Token(", "Token(kind", "Token(kind,", "Token(kind, text)", "Token(kind, text) {}"] {
+        if let Err(error) = interpreter.eval_program(&call("lex", input)) {
+            panic!("lexer failed on {input:?}: {error}");
+        }
+    }
+}
+
+#[test]
 fn compiled_compiler_lexer_accepts_each_source_line() {
     let (source, compiler) = compiler_program();
     let mut interpreter = Interpreter::new();
