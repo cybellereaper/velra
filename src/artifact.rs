@@ -114,9 +114,8 @@ impl<'a> FormParser<'a> {
                         '"' => '"',
                         '\\' => '\\',
                         other => {
-                            return Err(self.error(format!(
-                                "unsupported artifact string escape '\\{other}'"
-                            )))
+                            return Err(self
+                                .error(format!("unsupported artifact string escape '\\{other}'")))
                         }
                     });
                     self.cursor += 1;
@@ -535,10 +534,7 @@ fn expect_list<'a>(form: &'a Form, context: &str) -> Result<&'a [Form], Artifact
     }
 }
 
-fn expect_nonempty_list<'a>(
-    form: &'a Form,
-    context: &str,
-) -> Result<&'a [Form], ArtifactError> {
+fn expect_nonempty_list<'a>(form: &'a Form, context: &str) -> Result<&'a [Form], ArtifactError> {
     let list = expect_list(form, context)?;
     if list.is_empty() {
         invalid(format!("empty {context} list"))
@@ -591,7 +587,8 @@ mod tests {
 
     #[test]
     fn decodes_minimal_program() {
-        let artifact = "VELRA-AST-1\n(program (assign (ident \"x\") (int 42)) (expr (ident \"x\")))";
+        let artifact =
+            "VELRA-AST-1\n(program (assign (ident \"x\") (int 42)) (expr (ident \"x\")))";
         let program = decode(artifact).unwrap();
         assert_eq!(program.statements.len(), 2);
     }
