@@ -2,16 +2,29 @@
 
 Velra is a small, expression-oriented programming language focused on readable code, predictable semantics, and a deliberately compact syntax.
 
-The repository contains the Rust **stage-0 bootstrap implementation**. It has no runtime dependencies: the lexer, parser, evaluator, standard built-ins, CLI, and diagnostics are handwritten in Rust.
+Velra is self-hosted at the source-compiler boundary: the compiler in [`compiler/main.vel`](compiler/main.vel) lexes, parses, and emits Velra artifacts, and the released `velra` executable embeds a verified compiled copy of that compiler. End users do **not** need Rust or Cargo to run, check, or compile Velra programs.
 
-> Self-hosting is a bootstrap property, not a reason to duplicate the implementation. The Rust frontend is the reference bootstrap until the stage-1 compiler can compile itself; the bootstrap contract is documented in [`bootstrap/README.md`](bootstrap/README.md).
+Rust remains intentionally small and below the language boundary. It provides the portable runtime/VM, artifact loader, native CLI host, and trusted stage-0 bootstrap used to reproduce the embedded compiler. The production CLI does not use the Rust lexer/parser for user source.
+
+## Install
+
+Tagged releases publish standalone x86-64 binaries for:
+
+- Windows (`velra-x86_64-pc-windows-msvc.zip`)
+- Linux (`velra-x86_64-unknown-linux-gnu.tar.gz`)
+
+Each archive has a matching SHA-256 checksum. Extract the archive and place `velra` or `velra.exe` somewhere on your `PATH`.
+
+No Rust installation is required for released binaries.
 
 ## Quick start
 
 ```bash
-cargo run -- examples/hello.vel
-cargo run -- check examples/fibonacci.vel
-cargo run -- repl
+velra examples/hello.vel
+velra check examples/fibonacci.vel
+velra compile examples/fibonacci.vel fibonacci.velc
+velra exec fibonacci.velc
+velra repl
 ```
 
 A Velra program stays intentionally terse:
@@ -59,9 +72,38 @@ label = when status {
 name = user?.name ?: "anonymous"
 ```
 
+## Toolchain architecture
+
+The source-to-artifact path is:
+
+```text
+program.vel
+    |
+    v
+embedded compiler/bootstrap.velc
+    |  (compiler written in Velra)
+    v
+VELRA-AST-1 artifact
+    |
+    v
+Rust runtime / artifact loader
+    |
+    v
+program execution
+```
+
+The repository keeps two compiler implementations for one specific reason:
+
+- `compiler/main.vel` is the production source compiler and language implementation.
+- the Rust lexer/parser/encoder is stage 0: a trusted bootstrap seed and compatibility oracle used to reproduce the Velra compiler artifact.
+
+`compiler/bootstrap.velc` is checked in deliberately. Tests require it to be exactly the artifact produced from `compiler/main.vel`, and the Velra compiler must reproduce the same artifact byte-for-byte when compiling itself.
+
+See [`bootstrap/README.md`](bootstrap/README.md) for the trust chain and reproducibility contract.
+
 ## Language surface
 
-Implemented in stage 0:
+Implemented:
 
 - Unicode identifiers
 - `name = value` immutable bindings
@@ -80,14 +122,16 @@ Implemented in stage 0:
 - strict boolean logic and checked integer arithmetic
 - built-ins: `print`, `println`, `len`, `type`, `assert`, `range`, `push`, `read`, `write`
 - parser/check mode and REPL
+- deterministic compiled `VELRA-AST-1` artifacts
+- self-hosted source compilation
 
 Reserved by the grammar but intentionally not enabled until their semantics are specified: `object`, `extend`, `shape`, `async`, `await`, `try`, and `throw`.
 
-`use` declarations are parsed but module loading is not enabled in stage 0 yet. Failing explicitly is preferred to silently giving imports incorrect semantics.
+`use` declarations are parsed but module loading is not enabled yet. Failing explicitly is preferred to silently giving imports incorrect semantics.
 
 ## Types
 
-Velra uses inference by default. An annotation is a runtime contract in the bootstrap implementation:
+Velra uses inference by default. An annotation is a runtime contract in the current runtime:
 
 ```velra
 var age: Int = 20
@@ -110,11 +154,14 @@ Velra intentionally avoids syntax that does not pay for itself. The current dire
 - explicit mutation
 - no implicit truthiness
 - no silent numeric/string coercion
-- small standard library primitives that can support the self-hosted compiler
+- small standard-library primitives sufficient to implement the compiler in Velra
+- deterministic bootstrap artifacts
 
-`Lang.g4` remains the compatibility grammar while the handwritten Rust parser is bootstrapped. Where implementation and grammar differ, tests should make the intended behavior explicit before the grammar is changed.
+`Lang.g4` remains the compatibility grammar. The Velra compiler is now the production source frontend; the Rust stage-0 parser is retained only for bootstrap/reproducibility checks.
 
 ## Development
+
+Building the repository from source still requires Rust because Rust is the trusted bootstrap/runtime host:
 
 ```bash
 cargo fmt --all -- --check
@@ -123,7 +170,17 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 ```
 
-The CI workflow runs the same checks.
+The test suite verifies all three bootstrap stages:
+
+1. Rust stage 0 compiles `compiler/main.vel`.
+2. The resulting Velra compiler compiles normal Velra source.
+3. The Velra compiler recompiles itself byte-for-byte.
+
+It also verifies that the checked-in `compiler/bootstrap.velc` has not drifted from `compiler/main.vel`.
+
+## Releases
+
+The `Release` GitHub Actions workflow builds and smoke-tests native Windows and Linux binaries on pull requests. Pushing a version tag such as `v0.1.0` builds the same artifacts, computes SHA-256 checksums, and publishes them to a GitHub Release.
 
 ## License
 
