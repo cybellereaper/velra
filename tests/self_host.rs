@@ -41,9 +41,18 @@ fn compiled_artifacts_execute() {
 #[test]
 fn compiled_compiler_helpers_run() {
     let (_, compiler) = compiler_program();
-    assert!(matches!(invoke(compiler.clone(), "is_digit", "1"), Value::Bool(true)));
-    assert!(matches!(invoke(compiler.clone(), "quote", "x"), Value::String(value) if value == "\"x\""));
-    assert!(matches!(invoke(compiler.clone(), "lex", ""), Value::List(_)));
+    assert!(matches!(
+        invoke(compiler.clone(), "is_digit", "1"),
+        Value::Bool(true)
+    ));
+    assert!(matches!(
+        invoke(compiler.clone(), "quote", "x"),
+        Value::String(value) if value == "\"x\""
+    ));
+    assert!(matches!(
+        invoke(compiler.clone(), "lex", ""),
+        Value::List(_)
+    ));
     assert!(matches!(invoke(compiler, "lex", "x"), Value::List(_)));
 }
 
