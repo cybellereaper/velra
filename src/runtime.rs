@@ -405,11 +405,7 @@ impl Interpreter {
         match target {
             Expr::Ident(name) if name == "_" => Ok(()),
             Expr::Ident(name) => {
-                if binding_exists(&env, name) {
-                    assign(&env, name, value)?;
-                } else {
-                    define(&env, name, value, false)?;
-                }
+                assign_or_define(&env, name, value)?;
                 Ok(())
             }
             Expr::List(patterns) => {
@@ -951,54 +947,58 @@ impl Interpreter {
 
 fn define(env: &EnvRef, name: &str, value: Value, mutable: bool) -> RuntimeResult<()> {
     let mut env = env.borrow_mut();
-    if env.values.contains_key(name) {
-        return Err(RuntimeError::new(format!(
+    match env.values.entry(name.to_owned()) {
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(Binding { value, mutable });
+            Ok(())
+        }
+        std::collections::hash_map::Entry::Occupied(_) => Err(RuntimeError::new(format!(
             "name '{name}' is already defined in this scope"
-        )));
+        ))),
     }
-    env.values
-        .insert(name.to_owned(), Binding { value, mutable });
-    Ok(())
 }
 
 fn get(env: &EnvRef, name: &str) -> Option<Value> {
-    let (value, parent) = {
-        let env = env.borrow();
-        (
-            env.values.get(name).map(|binding| binding.value.clone()),
-            env.parent.clone(),
-        )
-    };
-    value.or_else(|| parent.and_then(|parent| get(&parent, name)))
-}
-
-fn binding_exists(env: &EnvRef, name: &str) -> bool {
-    let (exists, parent) = {
-        let env = env.borrow();
-        (env.values.contains_key(name), env.parent.clone())
-    };
-    exists || parent.is_some_and(|parent| binding_exists(&parent, name))
-}
-
-fn assign(env: &EnvRef, name: &str, value: Value) -> RuntimeResult<()> {
-    let parent = {
-        let mut env = env.borrow_mut();
-        if let Some(binding) = env.values.get_mut(name) {
-            if !binding.mutable {
-                return Err(RuntimeError::new(format!(
-                    "cannot assign to immutable binding '{name}'"
-                )));
-            }
-            binding.value = value;
-            return Ok(());
+    let mut current = Rc::clone(env);
+    loop {
+        let (value, parent) = {
+            let current = current.borrow();
+            (
+                current
+                    .values
+                    .get(name)
+                    .map(|binding| binding.value.clone()),
+                current.parent.clone(),
+            )
+        };
+        if value.is_some() {
+            return value;
         }
-        env.parent.clone()
-    };
-
-    match parent {
-        Some(parent) => assign(&parent, name, value),
-        None => Err(RuntimeError::new(format!("unknown name '{name}'"))),
+        current = parent?;
     }
+}
+
+fn assign_or_define(env: &EnvRef, name: &str, value: Value) -> RuntimeResult<()> {
+    let mut current = Rc::clone(env);
+    loop {
+        let parent = {
+            let mut current = current.borrow_mut();
+            if let Some(binding) = current.values.get_mut(name) {
+                if !binding.mutable {
+                    return Err(RuntimeError::new(format!(
+                        "cannot assign to immutable binding '{name}'"
+                    )));
+                }
+                binding.value = value;
+                return Ok(());
+            }
+            current.parent.clone()
+        };
+        let Some(parent) = parent else { break };
+        current = parent;
+    }
+
+    define(env, name, value, false)
 }
 
 fn install_builtins(env: &EnvRef) {
@@ -1445,12 +1445,9 @@ fn builtin_starts_with(args: Vec<Value>) -> RuntimeResult<Value> {
     require_arity("starts_with", 2, args.len())?;
     let cursor = cursor_ref(&args[0])?;
     let cursor = cursor.borrow();
-    let needle: Vec<Value> = match &args[1] {
-        Value::String(value) => value
-            .chars()
-            .map(|ch| Value::String(ch.to_string()))
-            .collect(),
-        Value::List(values) => values.borrow().clone(),
+    let matched = match &args[1] {
+        Value::String(value) => cursor_matches_string(&cursor, value).is_some(),
+        Value::List(values) => cursor_matches(&cursor, &values.borrow()),
         value => {
             return Err(RuntimeError::new(format!(
                 "starts_with() does not accept {}",
@@ -1458,15 +1455,7 @@ fn builtin_starts_with(args: Vec<Value>) -> RuntimeResult<Value> {
             )))
         }
     };
-    if cursor.position.saturating_add(needle.len()) > cursor.values.len() {
-        return Ok(Value::Bool(false));
-    }
-    Ok(Value::Bool(
-        cursor.values[cursor.position..cursor.position + needle.len()]
-            .iter()
-            .zip(needle.iter())
-            .all(|(left, right)| values_equal(left, right)),
-    ))
+    Ok(Value::Bool(matched))
 }
 
 fn cursor_values_to_value(is_string: bool, values: Vec<Value>) -> RuntimeResult<Value> {
@@ -1486,15 +1475,23 @@ fn cursor_values_to_value(is_string: bool, values: Vec<Value>) -> RuntimeResult<
     }
 }
 
-fn cursor_needle(needle: &Value) -> RuntimeResult<Vec<Value>> {
-    match needle {
-        Value::String(value) => Ok(value
-            .chars()
-            .map(|ch| Value::String(ch.to_string()))
-            .collect()),
-        Value::List(values) => Ok(values.borrow().clone()),
-        value => Ok(vec![value.clone()]),
+fn cursor_matches_string(cursor: &CursorState, needle: &str) -> Option<usize> {
+    let len = needle.chars().count();
+    if cursor.position.saturating_add(len) > cursor.values.len() {
+        return None;
     }
+
+    let matches = cursor.values[cursor.position..cursor.position + len]
+        .iter()
+        .zip(needle.chars())
+        .all(|(value, expected)| {
+            let Value::String(value) = value else {
+                return false;
+            };
+            let mut chars = value.chars();
+            chars.next() == Some(expected) && chars.next().is_none()
+        });
+    matches.then_some(len)
 }
 
 fn cursor_matches(cursor: &CursorState, needle: &[Value]) -> bool {
@@ -1507,36 +1504,45 @@ fn cursor_matches(cursor: &CursorState, needle: &[Value]) -> bool {
         .all(|(left, right)| values_equal(left, right))
 }
 
+fn cursor_match_len(cursor: &CursorState, needle: &Value) -> Option<usize> {
+    match needle {
+        Value::String(value) => cursor_matches_string(cursor, value),
+        Value::List(values) => {
+            let values = values.borrow();
+            cursor_matches(cursor, &values).then_some(values.len())
+        }
+        value => cursor_matches(cursor, std::slice::from_ref(value)).then_some(1),
+    }
+}
+
 fn builtin_consume(args: Vec<Value>) -> RuntimeResult<Value> {
     require_arity("consume", 2, args.len())?;
     let cursor = cursor_ref(&args[0])?;
-    let needle = cursor_needle(&args[1])?;
-    let matched = {
+    let match_len = {
         let cursor = cursor.borrow();
-        cursor_matches(&cursor, &needle)
+        cursor_match_len(&cursor, &args[1])
     };
-    if matched {
-        cursor.borrow_mut().position += needle.len();
+    if let Some(len) = match_len {
+        cursor.borrow_mut().position += len;
     }
-    Ok(Value::Bool(matched))
+    Ok(Value::Bool(match_len.is_some()))
 }
 
 fn builtin_expect_next(args: Vec<Value>) -> RuntimeResult<Value> {
     require_arity("expect_next", 2, args.len())?;
     let cursor = cursor_ref(&args[0])?;
-    let needle = cursor_needle(&args[1])?;
-    let matched = {
+    let match_len = {
         let cursor = cursor.borrow();
-        cursor_matches(&cursor, &needle)
+        cursor_match_len(&cursor, &args[1])
     };
-    if !matched {
+    let Some(len) = match_len else {
         return Err(RuntimeError::new(format!(
             "cursor expected {}, found {}",
             args[1],
             builtin_current(vec![args[0].clone()])?
         )));
-    }
-    cursor.borrow_mut().position += needle.len();
+    };
+    cursor.borrow_mut().position += len;
     Ok(args[1].clone())
 }
 
@@ -1544,7 +1550,7 @@ fn builtin_match_longest(args: Vec<Value>) -> RuntimeResult<Value> {
     require_arity("match_longest", 2, args.len())?;
     let cursor = cursor_ref(&args[0])?;
     let candidates = match &args[1] {
-        Value::List(values) | Value::Set(values) => values.borrow().clone(),
+        Value::List(values) | Value::Set(values) => Rc::clone(values),
         value => {
             return Err(RuntimeError::new(format!(
                 "match_longest() candidates must be List or Set, got {}",
@@ -1553,22 +1559,20 @@ fn builtin_match_longest(args: Vec<Value>) -> RuntimeResult<Value> {
         }
     };
     let mut best: Option<(String, usize)> = None;
-    for candidate in candidates {
+    let cursor_state = cursor.borrow();
+    for candidate in candidates.borrow().iter() {
         let Value::String(text) = candidate else {
             return Err(RuntimeError::new(
                 "match_longest() candidates must contain only String values",
             ));
         };
-        let needle: Vec<Value> = text
-            .chars()
-            .map(|ch| Value::String(ch.to_string()))
-            .collect();
-        if cursor_matches(&cursor.borrow(), &needle)
-            && best.as_ref().map_or(true, |(_, len)| needle.len() > *len)
-        {
-            best = Some((text, needle.len()));
+        if let Some(len) = cursor_matches_string(&cursor_state, text) {
+            if best.as_ref().map_or(true, |(_, best_len)| len > *best_len) {
+                best = Some((text.clone(), len));
+            }
         }
     }
+    drop(cursor_state);
     if let Some((text, len)) = best {
         cursor.borrow_mut().position += len;
         Ok(Value::String(text))
@@ -1886,25 +1890,28 @@ fn eval_binary_values(left: Value, op: BinaryOp, right: Value) -> RuntimeResult<
         _ => {}
     }
 
-    match (&left, &right) {
-        (Value::Int(a), Value::Int(b)) => eval_ints(*a, op, *b),
-        (Value::Float(a), Value::Float(b)) => eval_floats(*a, op, *b),
-        (Value::Int(a), Value::Float(b)) => eval_floats(*a as f64, op, *b),
-        (Value::Float(a), Value::Int(b)) => eval_floats(*a, op, *b as f64),
-        (Value::String(a), Value::String(b)) => match op {
-            Add => Ok(Value::String(format!("{a}{b}"))),
+    match (left, right) {
+        (Value::Int(a), Value::Int(b)) => eval_ints(a, op, b),
+        (Value::Float(a), Value::Float(b)) => eval_floats(a, op, b),
+        (Value::Int(a), Value::Float(b)) => eval_floats(a as f64, op, b),
+        (Value::Float(a), Value::Int(b)) => eval_floats(a, op, b as f64),
+        (Value::String(mut a), Value::String(b)) => match op {
+            Add => {
+                a.push_str(&b);
+                Ok(Value::String(a))
+            }
             Less => Ok(Value::Bool(a < b)),
             LessEqual => Ok(Value::Bool(a <= b)),
             Greater => Ok(Value::Bool(a > b)),
             GreaterEqual => Ok(Value::Bool(a >= b)),
-            _ => invalid_binary(&left, op, &right),
+            _ => invalid_binary(&Value::String(a), op, &Value::String(b)),
         },
         (Value::List(a), Value::List(b)) if op == Add => {
             let mut values = a.borrow().clone();
             values.extend(b.borrow().iter().cloned());
             Ok(Value::List(Rc::new(RefCell::new(values))))
         }
-        _ => invalid_binary(&left, op, &right),
+        (left, right) => invalid_binary(&left, op, &right),
     }
 }
 

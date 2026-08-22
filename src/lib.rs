@@ -58,8 +58,7 @@ impl From<RuntimeError> for Error {
 }
 
 pub fn check(source: &str) -> Result<ast::Program, Error> {
-    let tokens = lexer::lex(source)?;
-    Ok(parser::Parser::new(tokens).parse_program()?)
+    parse(source)
 }
 
 pub fn compile(source: &str) -> Result<String, Error> {
