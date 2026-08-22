@@ -8,8 +8,8 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 fn main() -> ExitCode {
     match run_cli() {
         Ok(()) => ExitCode::SUCCESS,
-        Err(message) => {
-            eprintln!("{message}");
+        Err(error) => {
+            eprintln!("{error}");
             ExitCode::FAILURE
         }
     }
@@ -17,164 +17,116 @@ fn main() -> ExitCode {
 
 fn run_cli() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
-    let Some(command) = args.next() else {
-        print_help();
-        return Ok(());
-    };
+    match args.next().as_deref() {
+        None => { print_help(); Ok(()) }
+        Some("-h") | Some("--help") | Some("help") => { print_help(); Ok(()) }
+        Some("-V") | Some("--version") | Some("version") => { println!("velra {VERSION}"); Ok(()) }
+        Some("run") | Some("check") | Some("compile") | Some("exec") | Some("repl") => {
+            dispatch_command(args.next(), args)
+        }
+        Some(path) if !path.starts_with('-') => run_file(path),
+        Some(command) => Err(format!("unknown command '{command}'. Run 'velra --help'.")),
+    }
+}
 
-    match command.as_str() {
-        "-h" | "--help" | "help" => {
-            print_help();
-            Ok(())
-        }
-        "-V" | "--version" | "version" => {
-            println!("velra {VERSION}");
-            Ok(())
-        }
-        "run" => {
-            let path = args
-                .next()
-                .ok_or_else(|| "usage: velra run <file.vel>".to_owned())?;
+fn dispatch_command(command_arg: Option<String>, mut args: impl Iterator<Item = String>) -> Result<(), String> {
+    let command = command_arg.as_deref().ok_or_else(|| "missing command".to_owned())?;
+    match command {
+        "run" | "check" => {
+            let path = args.next().ok_or_else(|| format!("usage: velra {command} <file.vel>"))?;
             ensure_no_extra_args(args)?;
-            run_file(&path)
-        }
-        "check" => {
-            let path = args
-                .next()
-                .ok_or_else(|| "usage: velra check <file.vel>".to_owned())?;
-            ensure_no_extra_args(args)?;
-            check_file(&path)
+            if command == "run" { run_file(&path) } else { check_file(&path) }
         }
         "compile" => {
-            let input = args
-                .next()
-                .ok_or_else(|| "usage: velra compile <input.vel> <output.velc>".to_owned())?;
-            let output = args
-                .next()
-                .ok_or_else(|| "usage: velra compile <input.vel> <output.velc>".to_owned())?;
+            let input = args.next().ok_or_else(|| "usage: velra compile <input.vel> <output.velc>".to_owned())?;
+            let output = args.next().ok_or_else(|| "usage: velra compile <input.vel> <output.velc>".to_owned())?;
             ensure_no_extra_args(args)?;
             compile_file(&input, &output)
         }
         "exec" => {
-            let path = args
-                .next()
-                .ok_or_else(|| "usage: velra exec <file.velc>".to_owned())?;
+            let path = args.next().ok_or_else(|| "usage: velra exec <file.velc>".to_owned())?;
             ensure_no_extra_args(args)?;
             exec_file(&path)
         }
-        "repl" => {
-            ensure_no_extra_args(args)?;
-            repl()
-        }
-        path if !path.starts_with('-') => {
-            ensure_no_extra_args(args)?;
-            run_file(path)
-        }
-        other => Err(format!("unknown command '{other}'. Run 'velra --help'.")),
+        "repl" => { ensure_no_extra_args(args)?; repl() }
+        _ => unreachable!(),
     }
 }
 
-fn self_hosted_compiler() -> Result<SelfHostedCompiler, String> {
-    SelfHostedCompiler::new()
-        .map_err(|error| format!("failed to initialize embedded Velra compiler: {error}"))
+fn compiler() -> Result<SelfHostedCompiler, String> {
+    SelfHostedCompiler::new().map_err(|e| format!("failed to initialize embedded Velra compiler: {e}"))
 }
 
 fn run_file(path: &str) -> Result<(), String> {
     let source = read_source(path)?;
-    let mut compiler = self_hosted_compiler()?;
-    let program = compiler
-        .check(&source)
-        .map_err(|error| render_error(path, &source, &error))?;
+    let mut compiler = compiler()?;
+    let program = compiler.check(&source).map_err(|e| render_error(path, &source, &e))?;
     execute(path, program)
 }
 
 fn check_file(path: &str) -> Result<(), String> {
     let source = read_source(path)?;
-    let mut compiler = self_hosted_compiler()?;
-    compiler
-        .check(&source)
-        .map_err(|error| render_error(path, &source, &error))?;
+    let mut compiler = compiler()?;
+    compiler.check(&source).map_err(|e| render_error(path, &source, &e))?;
     println!("{path}: ok");
     Ok(())
 }
 
 fn compile_file(input: &str, output: &str) -> Result<(), String> {
     let source = read_source(input)?;
-    let mut compiler = self_hosted_compiler()?;
-    let artifact = compiler
-        .compile(&source)
-        .map_err(|error| render_error(input, &source, &error))?;
-    fs::write(output, artifact).map_err(|error| format!("failed to write '{output}': {error}"))
+    let mut compiler = compiler()?;
+    let artifact = compiler.compile(&source).map_err(|e| render_error(input, &source, &e))?;
+    fs::write(output, artifact).map_err(|e| format!("failed to write '{output}': {e}"))
 }
 
 fn exec_file(path: &str) -> Result<(), String> {
     let artifact = read_source(path)?;
-    let program =
-        load_artifact(&artifact).map_err(|error| render_error(path, &artifact, &error))?;
+    let program = load_artifact(&artifact).map_err(|e| render_error(path, &artifact, &e))?;
     execute(path, program)
 }
 
 fn execute(path: &str, program: velra::ast::Program) -> Result<(), String> {
-    Interpreter::new()
-        .eval_program(&program)
-        .map(|_| ())
-        .map_err(|error| format!("{path}: runtime error: {error}"))
+    Interpreter::new().eval_program(&program).map(|_| ()).map_err(|e| format!("{path}: runtime error: {e}"))
 }
 
 fn repl() -> Result<(), String> {
     let stdin = io::stdin();
-    let mut compiler = self_hosted_compiler()?;
+    let mut compiler = compiler()?;
     let mut interpreter = Interpreter::new();
     let mut line = String::new();
-
     println!("Velra {VERSION}. Ctrl-D to exit.");
     loop {
         print!("> ");
-        io::stdout()
-            .flush()
-            .map_err(|error| format!("failed to write prompt: {error}"))?;
+        io::stdout().flush().map_err(|e| e.to_string())?;
         line.clear();
-        let read = stdin
-            .read_line(&mut line)
-            .map_err(|error| format!("failed to read input: {error}"))?;
-        if read == 0 {
-            println!();
-            break;
-        }
-        if line.trim().is_empty() {
-            continue;
-        }
-
+        if stdin.read_line(&mut line).map_err(|e| e.to_string())? == 0 { break; }
+        if line.trim().is_empty() { continue; }
         match compiler.check(&line) {
             Ok(program) => match interpreter.eval_program(&program) {
                 Ok(Value::Null) => {}
                 Ok(value) => println!("{value}"),
-                Err(error) => eprintln!("runtime error: {error}"),
+                Err(e) => eprintln!("runtime error: {e}"),
             },
-            Err(error) => eprintln!("{}", render_error("<repl>", &line, &error)),
+            Err(e) => eprintln!("{}", render_error("<repl>", &line, &e)),
         }
     }
     Ok(())
 }
 
 fn read_source(path: &str) -> Result<String, String> {
-    fs::read_to_string(path).map_err(|error| format!("failed to read '{path}': {error}"))
+    fs::read_to_string(path).map_err(|e| format!("failed to read '{path}': {e}"))
 }
 
 fn ensure_no_extra_args(mut args: impl Iterator<Item = String>) -> Result<(), String> {
-    if let Some(arg) = args.next() {
-        Err(format!("unexpected argument '{arg}'"))
-    } else {
-        Ok(())
-    }
+    match args.next() { Some(arg) => Err(format!("unexpected argument '{arg}'")), None => Ok(()) }
 }
 
 fn render_error(path: &str, source: &str, error: &Error) -> String {
     let (message, offset) = match error {
-        Error::Artifact(error) => (error.message.as_str(), error.offset),
-        Error::Lex(error) => (error.message.as_str(), error.span.start),
-        Error::Parse(error) => (error.message.as_str(), error.offset),
-        Error::Runtime(error) => return format!("{path}: compile/runtime error: {error}"),
+        Error::Artifact(e) => (&e.message, e.offset),
+        Error::Lex(e) => (&e.message, e.span.start),
+        Error::Parse(e) => (&e.message, e.offset),
+        Error::Runtime(e) => return format!("{path}: compile/runtime error: {e}"),
     };
     let (line, column) = line_column(source, offset);
     format!("{path}:{line}:{column}: {message}")
@@ -182,18 +134,10 @@ fn render_error(path: &str, source: &str, error: &Error) -> String {
 
 fn line_column(source: &str, offset: usize) -> (usize, usize) {
     let prefix = &source[..offset.min(source.len())];
-    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
-    let column = prefix
-        .rsplit_once('\n')
-        .map(|(_, tail)| tail.chars().count() + 1)
-        .unwrap_or_else(|| prefix.chars().count() + 1);
-    (line, column)
+    (prefix.bytes().filter(|b| *b == b'\n').count() + 1,
+     prefix.rsplit_once('\n').map(|(_, s)| s.chars().count() + 1).unwrap_or_else(|| prefix.chars().count() + 1))
 }
 
 fn print_help() {
-    println!(
-        "Velra {VERSION}\n\n\
-Usage:\n  velra <file.vel>\n  velra run <file.vel>\n  velra check <file.vel>\n  velra compile <input.vel> <output.velc>\n  velra exec <file.velc>\n  velra repl\n\n\
-Commands:\n  run      Compile with the embedded Velra compiler and execute source\n  check    Compile with the embedded Velra compiler without executing\n  compile  Compile source to a Velra artifact using the Velra compiler\n  exec     Execute a compiled Velra artifact\n  repl     Start an interactive session backed by the Velra compiler\n"
-    );
+    println!("Velra {VERSION}\n\nUsage:\n  velra <file.vel>\n  velra run <file.vel>\n  velra check <file.vel>\n  velra compile <input.vel> <output.velc>\n  velra exec <file.velc>\n  velra repl");
 }
