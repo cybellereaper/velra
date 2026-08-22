@@ -80,6 +80,7 @@ jobs:
         with:
           pattern: velra-*
           merge-multiple: true
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -89,5 +90,5 @@ jobs:
             --verify-tag \
             --generate-notes \
             --clobber \
-            velra-*.tar.gz velra-*.tar.gz.sha256 velra-*.zip velra-*.zip.sha256
+            $(find . -type f -name "velra-*")
 
