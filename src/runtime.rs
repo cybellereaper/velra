@@ -405,7 +405,11 @@ impl Interpreter {
         match target {
             Expr::Ident(name) if name == "_" => Ok(()),
             Expr::Ident(name) => {
-                assign_or_define(&env, name, value)?;
+                if binding_exists(&env, name) {
+                    assign(&env, name, value)?;
+                } else {
+                    define(&env, name, value, false)?;
+                }
                 Ok(())
             }
             Expr::List(patterns) => {
@@ -947,58 +951,54 @@ impl Interpreter {
 
 fn define(env: &EnvRef, name: &str, value: Value, mutable: bool) -> RuntimeResult<()> {
     let mut env = env.borrow_mut();
-    match env.values.entry(name.to_owned()) {
-        std::collections::hash_map::Entry::Vacant(entry) => {
-            entry.insert(Binding { value, mutable });
-            Ok(())
-        }
-        std::collections::hash_map::Entry::Occupied(_) => Err(RuntimeError::new(format!(
+    if env.values.contains_key(name) {
+        return Err(RuntimeError::new(format!(
             "name '{name}' is already defined in this scope"
-        ))),
+        )));
     }
+    env.values
+        .insert(name.to_owned(), Binding { value, mutable });
+    Ok(())
 }
 
 fn get(env: &EnvRef, name: &str) -> Option<Value> {
-    let mut current = Rc::clone(env);
-    loop {
-        let (value, parent) = {
-            let current = current.borrow();
-            (
-                current
-                    .values
-                    .get(name)
-                    .map(|binding| binding.value.clone()),
-                current.parent.clone(),
-            )
-        };
-        if value.is_some() {
-            return value;
-        }
-        current = parent?;
-    }
+    let (value, parent) = {
+        let env = env.borrow();
+        (
+            env.values.get(name).map(|binding| binding.value.clone()),
+            env.parent.clone(),
+        )
+    };
+    value.or_else(|| parent.and_then(|parent| get(&parent, name)))
 }
 
-fn assign_or_define(env: &EnvRef, name: &str, value: Value) -> RuntimeResult<()> {
-    let mut current = Rc::clone(env);
-    loop {
-        let parent = {
-            let mut current = current.borrow_mut();
-            if let Some(binding) = current.values.get_mut(name) {
-                if !binding.mutable {
-                    return Err(RuntimeError::new(format!(
-                        "cannot assign to immutable binding '{name}'"
-                    )));
-                }
-                binding.value = value;
-                return Ok(());
-            }
-            current.parent.clone()
-        };
-        let Some(parent) = parent else { break };
-        current = parent;
-    }
+fn binding_exists(env: &EnvRef, name: &str) -> bool {
+    let (exists, parent) = {
+        let env = env.borrow();
+        (env.values.contains_key(name), env.parent.clone())
+    };
+    exists || parent.is_some_and(|parent| binding_exists(&parent, name))
+}
 
-    define(env, name, value, false)
+fn assign(env: &EnvRef, name: &str, value: Value) -> RuntimeResult<()> {
+    let parent = {
+        let mut env = env.borrow_mut();
+        if let Some(binding) = env.values.get_mut(name) {
+            if !binding.mutable {
+                return Err(RuntimeError::new(format!(
+                    "cannot assign to immutable binding '{name}'"
+                )));
+            }
+            binding.value = value;
+            return Ok(());
+        }
+        env.parent.clone()
+    };
+
+    match parent {
+        Some(parent) => assign(&parent, name, value),
+        None => Err(RuntimeError::new(format!("unknown name '{name}'"))),
+    }
 }
 
 fn install_builtins(env: &EnvRef) {
@@ -1890,28 +1890,25 @@ fn eval_binary_values(left: Value, op: BinaryOp, right: Value) -> RuntimeResult<
         _ => {}
     }
 
-    match (left, right) {
-        (Value::Int(a), Value::Int(b)) => eval_ints(a, op, b),
-        (Value::Float(a), Value::Float(b)) => eval_floats(a, op, b),
-        (Value::Int(a), Value::Float(b)) => eval_floats(a as f64, op, b),
-        (Value::Float(a), Value::Int(b)) => eval_floats(a, op, b as f64),
-        (Value::String(mut a), Value::String(b)) => match op {
-            Add => {
-                a.push_str(&b);
-                Ok(Value::String(a))
-            }
+    match (&left, &right) {
+        (Value::Int(a), Value::Int(b)) => eval_ints(*a, op, *b),
+        (Value::Float(a), Value::Float(b)) => eval_floats(*a, op, *b),
+        (Value::Int(a), Value::Float(b)) => eval_floats(*a as f64, op, *b),
+        (Value::Float(a), Value::Int(b)) => eval_floats(*a, op, *b as f64),
+        (Value::String(a), Value::String(b)) => match op {
+            Add => Ok(Value::String(format!("{a}{b}"))),
             Less => Ok(Value::Bool(a < b)),
             LessEqual => Ok(Value::Bool(a <= b)),
             Greater => Ok(Value::Bool(a > b)),
             GreaterEqual => Ok(Value::Bool(a >= b)),
-            _ => invalid_binary(&Value::String(a), op, &Value::String(b)),
+            _ => invalid_binary(&left, op, &right),
         },
         (Value::List(a), Value::List(b)) if op == Add => {
             let mut values = a.borrow().clone();
             values.extend(b.borrow().iter().cloned());
             Ok(Value::List(Rc::new(RefCell::new(values))))
         }
-        (left, right) => invalid_binary(&left, op, &right),
+        _ => invalid_binary(&left, op, &right),
     }
 }
 
