@@ -88,4 +88,6 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --generate-notes \
+            --clobber \
             velra-*.tar.gz velra-*.tar.gz.sha256 velra-*.zip velra-*.zip.sha256
+
