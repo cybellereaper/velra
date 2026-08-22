@@ -1445,12 +1445,9 @@ fn builtin_starts_with(args: Vec<Value>) -> RuntimeResult<Value> {
     require_arity("starts_with", 2, args.len())?;
     let cursor = cursor_ref(&args[0])?;
     let cursor = cursor.borrow();
-    let needle: Vec<Value> = match &args[1] {
-        Value::String(value) => value
-            .chars()
-            .map(|ch| Value::String(ch.to_string()))
-            .collect(),
-        Value::List(values) => values.borrow().clone(),
+    let matched = match &args[1] {
+        Value::String(value) => cursor_matches_string(&cursor, value).is_some(),
+        Value::List(values) => cursor_matches(&cursor, &values.borrow()),
         value => {
             return Err(RuntimeError::new(format!(
                 "starts_with() does not accept {}",
@@ -1458,15 +1455,7 @@ fn builtin_starts_with(args: Vec<Value>) -> RuntimeResult<Value> {
             )))
         }
     };
-    if cursor.position.saturating_add(needle.len()) > cursor.values.len() {
-        return Ok(Value::Bool(false));
-    }
-    Ok(Value::Bool(
-        cursor.values[cursor.position..cursor.position + needle.len()]
-            .iter()
-            .zip(needle.iter())
-            .all(|(left, right)| values_equal(left, right)),
-    ))
+    Ok(Value::Bool(matched))
 }
 
 fn cursor_values_to_value(is_string: bool, values: Vec<Value>) -> RuntimeResult<Value> {
@@ -1486,15 +1475,23 @@ fn cursor_values_to_value(is_string: bool, values: Vec<Value>) -> RuntimeResult<
     }
 }
 
-fn cursor_needle(needle: &Value) -> RuntimeResult<Vec<Value>> {
-    match needle {
-        Value::String(value) => Ok(value
-            .chars()
-            .map(|ch| Value::String(ch.to_string()))
-            .collect()),
-        Value::List(values) => Ok(values.borrow().clone()),
-        value => Ok(vec![value.clone()]),
+fn cursor_matches_string(cursor: &CursorState, needle: &str) -> Option<usize> {
+    let len = needle.chars().count();
+    if cursor.position.saturating_add(len) > cursor.values.len() {
+        return None;
     }
+
+    let matches = cursor.values[cursor.position..cursor.position + len]
+        .iter()
+        .zip(needle.chars())
+        .all(|(value, expected)| {
+            let Value::String(value) = value else {
+                return false;
+            };
+            let mut chars = value.chars();
+            chars.next() == Some(expected) && chars.next().is_none()
+        });
+    matches.then_some(len)
 }
 
 fn cursor_matches(cursor: &CursorState, needle: &[Value]) -> bool {
@@ -1507,36 +1504,45 @@ fn cursor_matches(cursor: &CursorState, needle: &[Value]) -> bool {
         .all(|(left, right)| values_equal(left, right))
 }
 
+fn cursor_match_len(cursor: &CursorState, needle: &Value) -> Option<usize> {
+    match needle {
+        Value::String(value) => cursor_matches_string(cursor, value),
+        Value::List(values) => {
+            let values = values.borrow();
+            cursor_matches(cursor, &values).then_some(values.len())
+        }
+        value => cursor_matches(cursor, std::slice::from_ref(value)).then_some(1),
+    }
+}
+
 fn builtin_consume(args: Vec<Value>) -> RuntimeResult<Value> {
     require_arity("consume", 2, args.len())?;
     let cursor = cursor_ref(&args[0])?;
-    let needle = cursor_needle(&args[1])?;
-    let matched = {
+    let match_len = {
         let cursor = cursor.borrow();
-        cursor_matches(&cursor, &needle)
+        cursor_match_len(&cursor, &args[1])
     };
-    if matched {
-        cursor.borrow_mut().position += needle.len();
+    if let Some(len) = match_len {
+        cursor.borrow_mut().position += len;
     }
-    Ok(Value::Bool(matched))
+    Ok(Value::Bool(match_len.is_some()))
 }
 
 fn builtin_expect_next(args: Vec<Value>) -> RuntimeResult<Value> {
     require_arity("expect_next", 2, args.len())?;
     let cursor = cursor_ref(&args[0])?;
-    let needle = cursor_needle(&args[1])?;
-    let matched = {
+    let match_len = {
         let cursor = cursor.borrow();
-        cursor_matches(&cursor, &needle)
+        cursor_match_len(&cursor, &args[1])
     };
-    if !matched {
+    let Some(len) = match_len else {
         return Err(RuntimeError::new(format!(
             "cursor expected {}, found {}",
             args[1],
             builtin_current(vec![args[0].clone()])?
         )));
-    }
-    cursor.borrow_mut().position += needle.len();
+    };
+    cursor.borrow_mut().position += len;
     Ok(args[1].clone())
 }
 
@@ -1544,7 +1550,7 @@ fn builtin_match_longest(args: Vec<Value>) -> RuntimeResult<Value> {
     require_arity("match_longest", 2, args.len())?;
     let cursor = cursor_ref(&args[0])?;
     let candidates = match &args[1] {
-        Value::List(values) | Value::Set(values) => values.borrow().clone(),
+        Value::List(values) | Value::Set(values) => Rc::clone(values),
         value => {
             return Err(RuntimeError::new(format!(
                 "match_longest() candidates must be List or Set, got {}",
@@ -1553,22 +1559,20 @@ fn builtin_match_longest(args: Vec<Value>) -> RuntimeResult<Value> {
         }
     };
     let mut best: Option<(String, usize)> = None;
-    for candidate in candidates {
+    let cursor_state = cursor.borrow();
+    for candidate in candidates.borrow().iter() {
         let Value::String(text) = candidate else {
             return Err(RuntimeError::new(
                 "match_longest() candidates must contain only String values",
             ));
         };
-        let needle: Vec<Value> = text
-            .chars()
-            .map(|ch| Value::String(ch.to_string()))
-            .collect();
-        if cursor_matches(&cursor.borrow(), &needle)
-            && best.as_ref().map_or(true, |(_, len)| needle.len() > *len)
-        {
-            best = Some((text, needle.len()));
+        if let Some(len) = cursor_matches_string(&cursor_state, text) {
+            if best.as_ref().map_or(true, |(_, best_len)| len > *best_len) {
+                best = Some((text.clone(), len));
+            }
         }
     }
+    drop(cursor_state);
     if let Some((text, len)) = best {
         cursor.borrow_mut().position += len;
         Ok(Value::String(text))

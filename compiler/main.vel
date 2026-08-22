@@ -189,11 +189,6 @@ compile_expression_fragment(source) {
     expr
 }
 
-combine_interpolation_parts(parts, index, output) {
-    if index >= len(parts) { return output }
-    combine_interpolation_parts(parts, index + 1, binary(output, "add", parts[index]))
-}
-
 interpolate_string(value) {
     var parts = []
     var literal = ""
@@ -226,7 +221,13 @@ interpolate_string(value) {
     }
 
     if literal != "" || len(parts) == 0 { parts.push("(string " + quote(literal) + ")") }
-    combine_interpolation_parts(parts, 1, parts[0])
+    var output = parts[0]
+    var part_index = 1
+    while part_index < len(parts) {
+        output = binary(output, "add", parts[part_index])
+        part_index += 1
+    }
+    output
 }
 
 current_kind() {
@@ -262,11 +263,10 @@ expect(kind) {
 }
 
 consume_separators() {
-    if at("sep") {
+    while at("sep") {
         parse_cursor = parse_cursor + 1
-        return consume_separators()
     }
-    return null
+    null
 }
 
 take_name() {
@@ -276,19 +276,21 @@ take_name() {
     return text
 }
 
-matching_paren_from(index, depth) {
-    if index >= len(parse_tokens) { return -1 }
-    kind = kind_at(index)
-    if kind == "(" { return matching_paren_from(index + 1, depth + 1) }
-    if kind == ")" {
-        next_depth = depth - 1
-        if next_depth == 0 { return index }
-        return matching_paren_from(index + 1, next_depth)
+matching_paren(start) {
+    var index = start
+    var depth = 0
+    while index < len(parse_tokens) {
+        kind = kind_at(index)
+        if kind == "(" {
+            depth += 1
+        } else if kind == ")" {
+            depth -= 1
+            if depth == 0 { return index }
+        }
+        index += 1
     }
-    return matching_paren_from(index + 1, depth)
+    -1
 }
-
-matching_paren(start) => matching_paren_from(start, 0)
 
 looks_like_function_decl() {
     if !at("ident") || kind_at(parse_cursor + 1) != "(" { return false }
@@ -316,26 +318,21 @@ parse_type_name() {
     return name
 }
 
-parse_params_tail(output) {
-    if at(")") { return output }
-    name = take_name()
-    var type_name = null
-    if eat(":") { type_name = parse_type_name() }
-    next_output = output + " (param " + quote(name) + " " + optional_string(type_name) + ")"
-    consume_separators()
-    if eat(",") {
-        consume_separators()
-        return parse_params_tail(next_output)
-    }
-    return next_output
-}
-
 parse_params() {
     expect("(")
     consume_separators()
-    output = parse_params_tail("(params")
+    var output = "(params"
+    while !at(")") {
+        name = take_name()
+        var type_name = null
+        if eat(":") { type_name = parse_type_name() }
+        output += " (param " + quote(name) + " " + optional_string(type_name) + ")"
+        consume_separators()
+        if !eat(",") { break }
+        consume_separators()
+    }
     expect(")")
-    return output + ")"
+    output + ")"
 }
 
 parse_program() {
@@ -387,12 +384,11 @@ parse_statement() {
     return "(expr " + target + ")"
 }
 
-parse_use_tail(output) {
-    if eat(".") { return parse_use_tail(output + " " + quote(take_name())) }
-    return output
+parse_use() {
+    var output = "(use " + quote(take_name())
+    while eat(".") { output += " " + quote(take_name()) }
+    output + ")"
 }
-
-parse_use() => parse_use_tail("(use " + quote(take_name())) + ")"
 
 parse_var() {
     name = take_name()
@@ -459,38 +455,32 @@ parse_function() {
     return "(function " + quote(name) + " " + params + " (body-block " + parse_block() + "))"
 }
 
-parse_data_fields(computed) {
-    if at("}") { return computed }
-    field = take_name()
-    assert(eat("=") || eat("=>"), "expected computed field")
-    next_computed = computed + " (field " + quote(field) + " " + parse_expression() + ")"
-    if !at("}") { consume_separators() }
-    return parse_data_fields(next_computed)
-}
-
 parse_data() {
     name = expect("data-ident")
     params = parse_params()
     expect("{")
     consume_separators()
-    computed = parse_data_fields("(computed")
+    var computed = "(computed"
+    while !at("}") {
+        field = take_name()
+        assert(eat("=") || eat("=>"), "expected computed field")
+        computed += " (field " + quote(field) + " " + parse_expression() + ")"
+        if !at("}") { consume_separators() }
+    }
     expect("}")
     return "(data " + quote(name) + " " + params + " " + computed + "))"
-}
-
-parse_block_tail(output) {
-    if at("}") { return output }
-    next_output = output + " " + parse_statement()
-    if !at("}") { consume_separators() }
-    return parse_block_tail(next_output)
 }
 
 parse_block() {
     expect("{")
     consume_separators()
-    output = parse_block_tail("(block")
+    var output = "(block"
+    while !at("}") {
+        output += " " + parse_statement()
+        if !at("}") { consume_separators() }
+    }
     expect("}")
-    return output + ")"
+    output + ")"
 }
 
 parse_if() {
@@ -509,13 +499,14 @@ parse_if() {
     return "(if " + condition + " " + then_branch + " " + else_branch + ")"
 }
 
-parse_when_patterns(output) {
-    next_output = output + " " + parse_expression()
-    if eat(",") {
+parse_when_patterns() {
+    var output = "(patterns"
+    while true {
+        output += " " + parse_expression()
+        if !eat(",") { break }
         consume_separators()
-        return parse_when_patterns(next_output)
     }
-    return next_output + ")"
+    output + ")"
 }
 
 parse_when_body() {
@@ -528,18 +519,11 @@ parse_when_case() {
         expect("=>")
         return "(case (patterns) (none) " + parse_when_body() + " true)"
     }
-    patterns = parse_when_patterns("(patterns")
+    patterns = parse_when_patterns()
     var guard = "(none)"
     if eat("if") { guard = "(some " + parse_expression() + ")" }
     expect("=>")
     return "(case " + patterns + " " + guard + " " + parse_when_body() + " false)"
-}
-
-parse_when_cases(output) {
-    if at("}") { return output + ")" }
-    next_output = output + " " + parse_when_case()
-    if !at("}") { consume_separators() }
-    return parse_when_cases(next_output)
 }
 
 parse_when() {
@@ -555,53 +539,54 @@ parse_when() {
     }
     expect("{")
     consume_separators()
-    cases = parse_when_cases("(cases")
+    var cases = "(cases"
+    while !at("}") {
+        cases += " " + parse_when_case()
+        if !at("}") { consume_separators() }
+    }
     expect("}")
-    return "(when " + optional_string(binding) + " " + subject + " " + cases + ")"
+    return "(when " + optional_string(binding) + " " + subject + " " + cases + "))"
 }
 
 binary(left, op, right) => "(binary " + op + " " + left + " " + right + ")"
 
 parse_expression() => parse_pipeline()
 
-parse_pipeline_tail(expr) {
-    if eat("|>") {
+parse_pipeline() {
+    var expr = parse_elvis()
+    while eat("|>") {
         callee = parse_elvis()
-        return parse_pipeline_tail("(call " + callee + " (args " + expr + "))")
+        expr = "(call " + callee + " (args " + expr + "))"
     }
-    return expr
+    expr
 }
 
-parse_pipeline() => parse_pipeline_tail(parse_elvis())
-
-parse_elvis_tail(expr) {
-    if eat("?:") { return parse_elvis_tail(binary(expr, "elvis", parse_or())) }
-    return expr
+parse_elvis() {
+    var expr = parse_or()
+    while eat("?:") { expr = binary(expr, "elvis", parse_or()) }
+    expr
 }
 
-parse_elvis() => parse_elvis_tail(parse_or())
-
-parse_or_tail(expr) {
-    if eat("||") { return parse_or_tail(binary(expr, "or", parse_and())) }
-    return expr
+parse_or() {
+    var expr = parse_and()
+    while eat("||") { expr = binary(expr, "or", parse_and()) }
+    expr
 }
 
-parse_or() => parse_or_tail(parse_and())
-
-parse_and_tail(expr) {
-    if eat("&&") { return parse_and_tail(binary(expr, "and", parse_equality())) }
-    return expr
+parse_and() {
+    var expr = parse_equality()
+    while eat("&&") { expr = binary(expr, "and", parse_equality()) }
+    expr
 }
 
-parse_and() => parse_and_tail(parse_equality())
-
-parse_equality_tail(expr) {
-    if eat("==") { return parse_equality_tail(binary(expr, "equal", parse_comparison())) }
-    if eat("!=") { return parse_equality_tail(binary(expr, "not-equal", parse_comparison())) }
-    return expr
+parse_equality() {
+    var expr = parse_comparison()
+    while at("==") || at("!=") {
+        op = if eat("==") { "equal" } else { expect("!="); "not-equal" }
+        expr = binary(expr, op, parse_comparison())
+    }
+    expr
 }
-
-parse_equality() => parse_equality_tail(parse_comparison())
 
 parse_range() {
     start = parse_additive()
@@ -618,52 +603,47 @@ parse_range() {
     return start
 }
 
-parse_comparison_tail(expr) {
-    if eat("in") {
-        right = parse_range()
-        return parse_comparison_tail("(call (ident \"contains\") (args " + right + " " + expr + "))")
+parse_comparison() {
+    var expr = parse_range()
+    while at("in") || at("<") || at("<=") || at(">") || at(">=") {
+        if eat("in") {
+            right = parse_range()
+            expr = "(call (ident \"contains\") (args " + right + " " + expr + "))"
+        } else {
+            op = if eat("<") { "less" }
+                else if eat("<=") { "less-equal" }
+                else if eat(">") { "greater" }
+                else { expect(">="); "greater-equal" }
+            expr = binary(expr, op, parse_range())
+        }
     }
-    if eat("<") { return parse_comparison_tail(binary(expr, "less", parse_range())) }
-    if eat("<=") { return parse_comparison_tail(binary(expr, "less-equal", parse_range())) }
-    if eat(">") { return parse_comparison_tail(binary(expr, "greater", parse_range())) }
-    if eat(">=") { return parse_comparison_tail(binary(expr, "greater-equal", parse_range())) }
-    return expr
+    expr
 }
 
-parse_comparison() => parse_comparison_tail(parse_range())
-
-parse_additive_tail(expr) {
-    if eat("+") { return parse_additive_tail(binary(expr, "add", parse_multiplicative())) }
-    if eat("-") { return parse_additive_tail(binary(expr, "subtract", parse_multiplicative())) }
-    return expr
+parse_additive() {
+    var expr = parse_multiplicative()
+    while at("+") || at("-") {
+        op = if eat("+") { "add" } else { expect("-"); "subtract" }
+        expr = binary(expr, op, parse_multiplicative())
+    }
+    expr
 }
 
-parse_additive() => parse_additive_tail(parse_multiplicative())
-
-parse_multiplicative_tail(expr) {
-    if eat("*") { return parse_multiplicative_tail(binary(expr, "multiply", parse_unary())) }
-    if eat("/") { return parse_multiplicative_tail(binary(expr, "divide", parse_unary())) }
-    if eat("%") { return parse_multiplicative_tail(binary(expr, "remainder", parse_unary())) }
-    return expr
+parse_multiplicative() {
+    var expr = parse_unary()
+    while at("*") || at("/") || at("%") {
+        op = if eat("*") { "multiply" }
+            else if eat("/") { "divide" }
+            else { expect("%"); "remainder" }
+        expr = binary(expr, op, parse_unary())
+    }
+    expr
 }
-
-parse_multiplicative() => parse_multiplicative_tail(parse_unary())
 
 parse_unary() {
     if eat("-") { return "(unary negate " + parse_unary() + ")" }
     if eat("!") { return "(unary not " + parse_unary() + ")" }
     return parse_postfix()
-}
-
-parse_args_tail(args) {
-    if at(")") { return args }
-    next_args = args + " " + parse_expression()
-    consume_separators()
-    if eat(",") {
-        consume_separators()
-        return parse_args_tail(next_args)
-    }
-    return next_args
 }
 
 index_range_kind(start) {
@@ -686,115 +666,89 @@ index_range_kind(start) {
     null
 }
 
-parse_postfix_tail(expr) {
-    if eat("(") {
-        consume_separators()
-        args = parse_args_tail("(args")
-        expect(")")
-        return parse_postfix_tail("(call " + expr + " " + args + "))")
-    }
-    if eat(".") {
-        return parse_postfix_tail("(member " + expr + " " + quote(take_name()) + " false)")
-    }
-    if eat("?.") {
-        return parse_postfix_tail("(member " + expr + " " + quote(take_name()) + " true)")
-    }
-    if eat("[") {
-        range_kind = index_range_kind(parse_cursor)
-        if range_kind != null {
-            start = parse_additive()
-            inclusive = eat("..=")
-            if !inclusive { expect("..") }
-            end = parse_additive()
-            expect("]")
-            callee = if inclusive { "slice_inclusive" } else { "slice" }
-            return parse_postfix_tail("(call (ident \"" + callee + "\") (args " + expr + " " + start + " " + end + "))")
+parse_postfix() {
+    var expr = parse_primary()
+    while true {
+        if eat("(") {
+            consume_separators()
+            var args = "(args"
+            while !at(")") {
+                args += " " + parse_expression()
+                consume_separators()
+                if !eat(",") { break }
+                consume_separators()
+            }
+            expect(")")
+            expr = "(call " + expr + " " + args + "))"
+        } else if eat(".") {
+            expr = "(member " + expr + " " + quote(take_name()) + " false)"
+        } else if eat("?.") {
+            expr = "(member " + expr + " " + quote(take_name()) + " true)"
+        } else if eat("[") {
+            range_kind = index_range_kind(parse_cursor)
+            if range_kind != null {
+                start = parse_additive()
+                inclusive = eat("..=")
+                if !inclusive { expect("..") }
+                end = parse_additive()
+                expect("]")
+                callee = if inclusive { "slice_inclusive" } else { "slice" }
+                expr = "(call (ident \"" + callee + "\") (args " + expr + " " + start + " " + end + "))"
+            } else {
+                index = parse_expression()
+                expect("]")
+                expr = "(index " + expr + " " + index + ")"
+            }
+        } else if eat("?") {
+            expr = "(propagate " + expr + ")"
+        } else {
+            return expr
         }
-        index = parse_expression()
-        expect("]")
-        return parse_postfix_tail("(index " + expr + " " + index + ")")
     }
-    if eat("?") { return parse_postfix_tail("(propagate " + expr + ")") }
-    return expr
-}
-
-parse_postfix() => parse_postfix_tail(parse_primary())
-
-parse_list_tail(output) {
-    if at("]") { return output }
-    if eat("...") {
-        name = expect("ident")
-        if eat(",") { consume_separators() }
-        assert(at("]"), "rest pattern must be final")
-        return output + " (rest " + quote(name) + ")"
-    }
-    next_output = output + " " + parse_expression()
-    consume_separators()
-    if eat(",") {
-        consume_separators()
-        return parse_list_tail(next_output)
-    }
-    return next_output
-}
-
-
-
-parse_map_entries(output) {
-    if at("}") { return output }
-    key = parse_expression()
-    expect(":")
-    value = parse_expression()
-    next_output = output + " (entry " + key + " " + value + ")"
-    consume_separators()
-    if eat(",") {
-        consume_separators()
-        return parse_map_entries(next_output)
-    }
-    return next_output
 }
 
 parse_map() {
     consume_separators()
-    output = parse_map_entries("(map")
+    var output = "(map"
+    while !at("}") {
+        key = parse_expression()
+        expect(":")
+        value = parse_expression()
+        output += " (entry " + key + " " + value + ")"
+        consume_separators()
+        if !eat(",") { break }
+        consume_separators()
+    }
     expect("}")
     output + ")"
-}
-
-parse_set_tail(output) {
-    if at("}") { return output }
-    next_output = output + " " + parse_expression()
-    consume_separators()
-    if eat(",") {
-        consume_separators()
-        return parse_set_tail(next_output)
-    }
-    return next_output
 }
 
 parse_set() {
     expect("{")
     consume_separators()
-    output = parse_set_tail("(set")
+    var output = "(set"
+    while !at("}") {
+        output += " " + parse_expression()
+        consume_separators()
+        if !eat(",") { break }
+        consume_separators()
+    }
     expect("}")
     output + ")"
 }
 
-parse_lambda_params(output) {
-    name = take_name()
-    next_output = output + " (param " + quote(name) + " (none))"
-    consume_separators()
-    if eat(",") {
-        consume_separators()
-        return parse_lambda_params(next_output)
-    }
-    return next_output + ")"
-}
-
 parse_lambda() {
     consume_separators()
-    params = parse_lambda_params("(params")
+    var params = "(params"
+    while true {
+        name = take_name()
+        params += " (param " + quote(name) + " (none))"
+        consume_separators()
+        if !eat(",") { break }
+        consume_separators()
+    }
     expect("|")
-    return "(lambda " + params + " " + parse_expression() + ")"
+    return "(lambda " + params + ") " + parse_expression() + ")"
 }
 
 parse_primary() {
@@ -828,7 +782,20 @@ parse_primary() {
     }
     if eat("[") {
         consume_separators()
-        output = parse_list_tail("(list")
+        var output = "(list"
+        while !at("]") {
+            if eat("...") {
+                name = expect("ident")
+                if eat(",") { consume_separators() }
+                assert(at("]"), "rest pattern must be final")
+                output += " (rest " + quote(name) + ")"
+                break
+            }
+            output += " " + parse_expression()
+            consume_separators()
+            if !eat(",") { break }
+            consume_separators()
+        }
         expect("]")
         return output + ")"
     }
