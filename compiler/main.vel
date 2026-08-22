@@ -87,7 +87,7 @@ scan_symbol(input) {
 
 next_token(input) => when ch = input.current() {
         _ if ch in WHITESPACE => {
-            input.advance()
+            input.skip_while(|value| value in WHITESPACE)
             null
         }
         "\n" => {
@@ -230,22 +230,14 @@ interpolate_string(value) {
     output
 }
 
-current_kind() {
-    if parse_cursor >= len(parse_tokens) { return "eof" }
-    return parse_tokens[parse_cursor].kind
-}
-
-current_text() {
-    if parse_cursor >= len(parse_tokens) { return "" }
-    return parse_tokens[parse_cursor].text
-}
+current_text() => parse_tokens[parse_cursor].text
 
 kind_at(index) {
     if index < 0 || index >= len(parse_tokens) { return "eof" }
     return parse_tokens[index].kind
 }
 
-at(kind) => current_kind() == kind
+at(kind) => parse_tokens[parse_cursor].kind == kind
 
 eat(kind) {
     if at(kind) {
@@ -256,10 +248,10 @@ eat(kind) {
 }
 
 expect(kind) {
-    assert(at(kind), "unexpected token")
-    text = current_text()
+    token = parse_tokens[parse_cursor]
+    assert(token.kind == kind, "unexpected token")
     parse_cursor = parse_cursor + 1
-    return text
+    return token.text
 }
 
 consume_separators() {
@@ -270,10 +262,10 @@ consume_separators() {
 }
 
 take_name() {
-    assert(at("ident") || at("data-ident"), "expected name")
-    text = current_text()
+    token = parse_tokens[parse_cursor]
+    assert(token.kind == "ident" || token.kind == "data-ident", "expected name")
     parse_cursor = parse_cursor + 1
-    return text
+    return token.text
 }
 
 matching_paren(start) {
@@ -347,35 +339,69 @@ parse_program() {
 }
 
 parse_statement() {
-    if eat("pub") { return "(pub " + parse_statement() + ")" }
-    if eat("use") { return parse_use() }
-    if eat("var") { return parse_var() }
-    if eat("return") { return parse_return() }
-    if eat("require") { return parse_require() }
-    if eat("while") { return parse_while() }
-    if eat("break") { return "(break)" }
-    if eat("continue") { return "(continue)" }
-    if eat("for") { return parse_for() }
-    if eat("enum") { return parse_enum() }
-    if at("if") { return "(expr " + parse_if() + ")" }
-    if at("when") { return "(expr " + parse_when() + ")" }
-    if looks_like_data_decl() { return parse_data() }
-    if looks_like_function_decl() { return parse_function() }
+    kind = parse_tokens[parse_cursor].kind
+    if kind == "pub" {
+        parse_cursor += 1
+        return "(pub " + parse_statement() + ")"
+    }
+    if kind == "use" {
+        parse_cursor += 1
+        return parse_use()
+    }
+    if kind == "var" {
+        parse_cursor += 1
+        return parse_var()
+    }
+    if kind == "return" {
+        parse_cursor += 1
+        return parse_return()
+    }
+    if kind == "require" {
+        parse_cursor += 1
+        return parse_require()
+    }
+    if kind == "while" {
+        parse_cursor += 1
+        return parse_while()
+    }
+    if kind == "break" {
+        parse_cursor += 1
+        return "(break)"
+    }
+    if kind == "continue" {
+        parse_cursor += 1
+        return "(continue)"
+    }
+    if kind == "for" {
+        parse_cursor += 1
+        return parse_for()
+    }
+    if kind == "enum" {
+        parse_cursor += 1
+        return parse_enum()
+    }
+    if kind == "if" { return "(expr " + parse_if() + ")" }
+    if kind == "when" { return "(expr " + parse_when() + ")" }
+    if kind == "data-ident" && looks_like_data_decl() { return parse_data() }
+    if kind == "ident" && looks_like_function_decl() { return parse_function() }
 
     target = parse_expression()
-    if eat("=") {
+    assignment_kind = parse_tokens[parse_cursor].kind
+    if assignment_kind == "=" {
+        parse_cursor += 1
         value = parse_expression()
         return "(assign " + target + " " + value + ")"
     }
 
     var op = null
-    if eat("+=") { op = "add" }
-    else if eat("-=") { op = "subtract" }
-    else if eat("*=") { op = "multiply" }
-    else if eat("/=") { op = "divide" }
-    else if eat("%=") { op = "remainder" }
+    if assignment_kind == "+=" { op = "add" }
+    else if assignment_kind == "-=" { op = "subtract" }
+    else if assignment_kind == "*=" { op = "multiply" }
+    else if assignment_kind == "/=" { op = "divide" }
+    else if assignment_kind == "%=" { op = "remainder" }
 
     if op != null {
+        parse_cursor += 1
         assert(len(target) >= 7 && target[0..7] == "(ident ", "compound assignment currently requires an identifier target")
         value = parse_expression()
         return "(assign " + target + " " + binary(target, op, value) + ")"
@@ -554,7 +580,8 @@ parse_expression() => parse_pipeline()
 
 parse_pipeline() {
     var expr = parse_elvis()
-    while eat("|>") {
+    while parse_tokens[parse_cursor].kind == "|>" {
+        parse_cursor += 1
         callee = parse_elvis()
         expr = "(call " + callee + " (args " + expr + "))"
     }
@@ -563,29 +590,40 @@ parse_pipeline() {
 
 parse_elvis() {
     var expr = parse_or()
-    while eat("?:") { expr = binary(expr, "elvis", parse_or()) }
+    while parse_tokens[parse_cursor].kind == "?:" {
+        parse_cursor += 1
+        expr = binary(expr, "elvis", parse_or())
+    }
     expr
 }
 
 parse_or() {
     var expr = parse_and()
-    while eat("||") { expr = binary(expr, "or", parse_and()) }
+    while parse_tokens[parse_cursor].kind == "||" {
+        parse_cursor += 1
+        expr = binary(expr, "or", parse_and())
+    }
     expr
 }
 
 parse_and() {
     var expr = parse_equality()
-    while eat("&&") { expr = binary(expr, "and", parse_equality()) }
+    while parse_tokens[parse_cursor].kind == "&&" {
+        parse_cursor += 1
+        expr = binary(expr, "and", parse_equality())
+    }
     expr
 }
 
 parse_equality() {
     var expr = parse_comparison()
-    while at("==") || at("!=") {
-        op = if eat("==") { "equal" } else { expect("!="); "not-equal" }
+    while true {
+        kind = parse_tokens[parse_cursor].kind
+        if kind != "==" && kind != "!=" { return expr }
+        parse_cursor += 1
+        op = if kind == "==" { "equal" } else { "not-equal" }
         expr = binary(expr, op, parse_comparison())
     }
-    expr
 }
 
 parse_range() {
@@ -605,39 +643,46 @@ parse_range() {
 
 parse_comparison() {
     var expr = parse_range()
-    while at("in") || at("<") || at("<=") || at(">") || at(">=") {
-        if eat("in") {
+    while true {
+        kind = parse_tokens[parse_cursor].kind
+        if kind == "in" {
+            parse_cursor += 1
             right = parse_range()
             expr = "(call (ident \"contains\") (args " + right + " " + expr + "))"
-        } else {
-            op = if eat("<") { "less" }
-                else if eat("<=") { "less-equal" }
-                else if eat(">") { "greater" }
-                else { expect(">="); "greater-equal" }
-            expr = binary(expr, op, parse_range())
+            continue
         }
+        if kind != "<" && kind != "<=" && kind != ">" && kind != ">=" { return expr }
+        parse_cursor += 1
+        op = if kind == "<" { "less" }
+            else if kind == "<=" { "less-equal" }
+            else if kind == ">" { "greater" }
+            else { "greater-equal" }
+        expr = binary(expr, op, parse_range())
     }
-    expr
 }
 
 parse_additive() {
     var expr = parse_multiplicative()
-    while at("+") || at("-") {
-        op = if eat("+") { "add" } else { expect("-"); "subtract" }
+    while true {
+        kind = parse_tokens[parse_cursor].kind
+        if kind != "+" && kind != "-" { return expr }
+        parse_cursor += 1
+        op = if kind == "+" { "add" } else { "subtract" }
         expr = binary(expr, op, parse_multiplicative())
     }
-    expr
 }
 
 parse_multiplicative() {
     var expr = parse_unary()
-    while at("*") || at("/") || at("%") {
-        op = if eat("*") { "multiply" }
-            else if eat("/") { "divide" }
-            else { expect("%"); "remainder" }
+    while true {
+        kind = parse_tokens[parse_cursor].kind
+        if kind != "*" && kind != "/" && kind != "%" { return expr }
+        parse_cursor += 1
+        op = if kind == "*" { "multiply" }
+            else if kind == "/" { "divide" }
+            else { "remainder" }
         expr = binary(expr, op, parse_unary())
     }
-    expr
 }
 
 parse_unary() {
@@ -669,7 +714,9 @@ index_range_kind(start) {
 parse_postfix() {
     var expr = parse_primary()
     while true {
-        if eat("(") {
+        kind = parse_tokens[parse_cursor].kind
+        if kind == "(" {
+            parse_cursor += 1
             consume_separators()
             var args = "(args"
             while !at(")") {
@@ -680,11 +727,14 @@ parse_postfix() {
             }
             expect(")")
             expr = "(call " + expr + " " + args + "))"
-        } else if eat(".") {
+        } else if kind == "." {
+            parse_cursor += 1
             expr = "(member " + expr + " " + quote(take_name()) + " false)"
-        } else if eat("?.") {
+        } else if kind == "?." {
+            parse_cursor += 1
             expr = "(member " + expr + " " + quote(take_name()) + " true)"
-        } else if eat("[") {
+        } else if kind == "[" {
+            parse_cursor += 1
             range_kind = index_range_kind(parse_cursor)
             if range_kind != null {
                 start = parse_additive()
@@ -699,7 +749,8 @@ parse_postfix() {
                 expect("]")
                 expr = "(index " + expr + " " + index + ")"
             }
-        } else if eat("?") {
+        } else if kind == "?" {
+            parse_cursor += 1
             expr = "(propagate " + expr + ")"
         } else {
             return expr
@@ -752,35 +803,48 @@ parse_lambda() {
 }
 
 parse_primary() {
-    if at("int") {
-        value = current_text()
+    token = parse_tokens[parse_cursor]
+    kind = token.kind
+    if kind == "int" {
         parse_cursor = parse_cursor + 1
-        return "(int " + value + ")"
+        return "(int " + token.text + ")"
     }
-    if at("float") {
-        value = current_text()
+    if kind == "float" {
         parse_cursor = parse_cursor + 1
-        return "(float " + value + ")"
+        return "(float " + token.text + ")"
     }
-    if at("string") {
-        value = current_text()
+    if kind == "string" {
         parse_cursor = parse_cursor + 1
-        return interpolate_string(value)
+        return interpolate_string(token.text)
     }
-    if eat("true") { return "(bool true)" }
-    if eat("false") { return "(bool false)" }
-    if eat("null") { return "null" }
-    if eat("|") { return parse_lambda() }
-    if at("ident") || at("data-ident") {
-        name = take_name()
-        return "(ident " + quote(name) + ")"
+    if kind == "true" {
+        parse_cursor += 1
+        return "(bool true)"
     }
-    if eat("(") {
+    if kind == "false" {
+        parse_cursor += 1
+        return "(bool false)"
+    }
+    if kind == "null" {
+        parse_cursor += 1
+        return "null"
+    }
+    if kind == "|" {
+        parse_cursor += 1
+        return parse_lambda()
+    }
+    if kind == "ident" || kind == "data-ident" {
+        parse_cursor += 1
+        return "(ident " + quote(token.text) + ")"
+    }
+    if kind == "(" {
+        parse_cursor += 1
         expr = parse_expression()
         expect(")")
         return expr
     }
-    if eat("[") {
+    if kind == "[" {
+        parse_cursor += 1
         consume_separators()
         var output = "(list"
         while !at("]") {
@@ -799,10 +863,16 @@ parse_primary() {
         expect("]")
         return output + ")"
     }
-    if eat("{") { return parse_map() }
-    if eat("#") { return parse_set() }
-    if at("if") { return parse_if() }
-    if at("when") { return parse_when() }
+    if kind == "{" {
+        parse_cursor += 1
+        return parse_map()
+    }
+    if kind == "#" {
+        parse_cursor += 1
+        return parse_set()
+    }
+    if kind == "if" { return parse_if() }
+    if kind == "when" { return parse_when() }
     assert(false, "expected expression")
     return "null"
 }
