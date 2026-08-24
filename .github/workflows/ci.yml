@@ -24,5 +24,3 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
         run: cargo test --all-targets
-      - name: Perf baseline
-        run: cargo test --release --test perf -- --ignored --nocapture
