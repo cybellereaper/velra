@@ -51,7 +51,6 @@ pub fn decode(source: &str) -> Result<Program, ArtifactError> {
 
 struct FormParser<'a> {
     source: &'a str,
-    chars: Vec<(usize, char)>,
     cursor: usize,
     offset_base: usize,
 }
@@ -60,7 +59,6 @@ impl<'a> FormParser<'a> {
     fn new(source: &'a str, offset_base: usize) -> Self {
         Self {
             source,
-            chars: source.char_indices().collect(),
             cursor: 0,
             offset_base,
         }
@@ -118,11 +116,11 @@ impl<'a> FormParser<'a> {
                                 .error(format!("unsupported artifact string escape '\\{other}'")))
                         }
                     });
-                    self.cursor += 1;
+                    self.cursor += escape.len_utf8();
                 }
                 other => {
                     value.push(other);
-                    self.cursor += 1;
+                    self.cursor += other.len_utf8();
                 }
             }
         }
@@ -131,45 +129,37 @@ impl<'a> FormParser<'a> {
 
     fn parse_atom(&mut self) -> Result<Form, ArtifactError> {
         let start = self.cursor;
-        while self
-            .current_char()
-            .is_some_and(|ch| !ch.is_whitespace() && ch != '(' && ch != ')')
-        {
-            self.cursor += 1;
+        while let Some(ch) = self.current_char() {
+            if ch.is_whitespace() || ch == '(' || ch == ')' {
+                break;
+            }
+            self.cursor += ch.len_utf8();
         }
         if start == self.cursor {
             return Err(self.error("expected artifact atom"));
         }
-        let start_byte = self.chars[start].0;
-        let end_byte = self
-            .chars
-            .get(self.cursor)
-            .map(|(byte, _)| *byte)
-            .unwrap_or(self.source.len());
-        Ok(Form::Atom(self.source[start_byte..end_byte].to_owned()))
+        Ok(Form::Atom(self.source[start..self.cursor].to_owned()))
     }
 
     fn skip_whitespace(&mut self) {
-        while self.current_char().is_some_and(char::is_whitespace) {
-            self.cursor += 1;
+        while let Some(ch) = self.current_char() {
+            if !ch.is_whitespace() {
+                break;
+            }
+            self.cursor += ch.len_utf8();
         }
     }
 
     fn current_char(&self) -> Option<char> {
-        self.chars.get(self.cursor).map(|(_, ch)| *ch)
+        self.source.get(self.cursor..)?.chars().next()
     }
 
     fn is_eof(&self) -> bool {
-        self.cursor >= self.chars.len()
+        self.cursor >= self.source.len()
     }
 
     fn error(&self, message: impl Into<String>) -> ArtifactError {
-        let local = self
-            .chars
-            .get(self.cursor)
-            .map(|(byte, _)| *byte)
-            .unwrap_or(self.source.len());
-        ArtifactError::new(message, self.offset_base + local)
+        ArtifactError::new(message, self.offset_base + self.cursor)
     }
 }
 
@@ -670,5 +660,13 @@ mod tests {
             &program.statements[0],
             Stmt::Expr(Expr::String(value)) if value == "a\n\"b"
         ));
+    }
+
+    #[test]
+    fn reports_unicode_string_escape_offsets_in_bytes() {
+        let body = "(\"é\\x\")";
+        let mut parser = FormParser::new(body, HEADER.len());
+        let error = parser.parse_form().unwrap_err();
+        assert_eq!(error.offset, HEADER.len() + 5);
     }
 }
