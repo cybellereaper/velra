@@ -1233,11 +1233,10 @@ fn builtin_get(args: Vec<Value>) -> RuntimeResult<Value> {
             Ok(values[index].clone())
         }
         (Value::String(value), Value::Int(index)) => {
-            let chars: Vec<char> = value.chars().collect();
-            let Some(index) = safe_index(*index, chars.len()) else {
+            let Some(ch) = string_char_at(value, *index) else {
                 return Ok(Value::Null);
             };
-            Ok(Value::String(chars[index].to_string()))
+            Ok(Value::String(ch.to_string()))
         }
         (Value::Map(entries), key) => Ok(entries
             .borrow()
@@ -1283,9 +1282,10 @@ fn slice_value(args: &[Value], inclusive: bool) -> RuntimeResult<Value> {
             ))))
         }
         Value::String(value) => {
-            let chars: Vec<char> = value.chars().collect();
-            let (start, end) = normalize_slice_bounds(*start, *end, chars.len(), inclusive)?;
-            Ok(Value::String(chars[start..end].iter().collect()))
+            let char_len = value.chars().count();
+            let (start, end) = normalize_slice_bounds(*start, *end, char_len, inclusive)?;
+            let (start, end) = string_byte_bounds(value, start, end);
+            Ok(Value::String(value[start..end].to_owned()))
         }
         value => Err(RuntimeError::new(format!(
             "{name}() does not accept {}",
@@ -2064,9 +2064,8 @@ fn index_value(object: Value, index: Value) -> RuntimeResult<Value> {
             Ok(values.borrow()[index].clone())
         }
         (Value::String(value), Value::Int(index)) => {
-            let chars: Vec<char> = value.chars().collect();
-            let index = normalize_index(index, chars.len())?;
-            Ok(Value::String(chars[index].to_string()))
+            let ch = string_index(&value, index)?;
+            Ok(Value::String(ch.to_string()))
         }
         (Value::Map(entries), key) => entries
             .borrow()
@@ -2094,6 +2093,46 @@ fn safe_index(index: i64, len: usize) -> Option<usize> {
         return None;
     }
     usize::try_from(normalized).ok()
+}
+
+fn string_char_at(value: &str, index: i64) -> Option<char> {
+    if index >= 0 {
+        return usize::try_from(index)
+            .ok()
+            .and_then(|index| value.chars().nth(index));
+    }
+
+    let index = safe_index(index, value.chars().count())?;
+    value.chars().nth(index)
+}
+
+fn string_index(value: &str, index: i64) -> RuntimeResult<char> {
+    if let Some(ch) = string_char_at(value, index) {
+        return Ok(ch);
+    }
+
+    let len = value.chars().count();
+    Err(RuntimeError::new(format!(
+        "index {index} is out of bounds for length {len}"
+    )))
+}
+
+fn string_byte_bounds(value: &str, start: usize, end: usize) -> (usize, usize) {
+    debug_assert!(start <= end);
+    let mut boundaries = value
+        .char_indices()
+        .map(|(byte, _)| byte)
+        .chain(std::iter::once(value.len()));
+    let start_byte = boundaries
+        .nth(start)
+        .expect("normalized string slice start must exist");
+    if start == end {
+        return (start_byte, start_byte);
+    }
+    let end_byte = boundaries
+        .nth(end - start - 1)
+        .expect("normalized string slice end must exist");
+    (start_byte, end_byte)
 }
 
 fn normalize_slice_bound(index: i64, len: usize, allow_end: bool) -> RuntimeResult<usize> {
@@ -2210,5 +2249,43 @@ choose(x) {
 choose(1)
 "#;
         assert_eq!(eval(source).unwrap().to_string(), "yes");
+    }
+
+    #[test]
+    fn string_indexing_and_slicing_use_character_offsets() {
+        let value = Value::String("aé🙂z".into());
+
+        assert_eq!(
+            builtin_get(vec![value.clone(), Value::Int(1)])
+                .unwrap()
+                .to_string(),
+            "é"
+        );
+        assert_eq!(
+            builtin_get(vec![value.clone(), Value::Int(-1)])
+                .unwrap()
+                .to_string(),
+            "z"
+        );
+        assert!(matches!(
+            builtin_get(vec![value.clone(), Value::Int(4)]).unwrap(),
+            Value::Null
+        ));
+        assert_eq!(
+            index_value(value.clone(), Value::Int(-2))
+                .unwrap()
+                .to_string(),
+            "🙂"
+        );
+
+        let exclusive = slice_value(
+            &[value.clone(), Value::Int(1), Value::Int(3)],
+            false,
+        )
+        .unwrap();
+        assert_eq!(exclusive.to_string(), "é🙂");
+
+        let inclusive = slice_value(&[value, Value::Int(-3), Value::Int(-2)], true).unwrap();
+        assert_eq!(inclusive.to_string(), "é🙂");
     }
 }
