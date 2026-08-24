@@ -32,33 +32,24 @@ fn run_cli() -> Result<(), String> {
             Ok(())
         }
         "run" => {
-            let path = args
-                .next()
-                .ok_or_else(|| "usage: velra run <file.vel>".to_owned())?;
+            let path = required_arg(&mut args, "usage: velra run <file.vel>")?;
             ensure_no_extra_args(args)?;
             run_file(&path)
         }
         "check" => {
-            let path = args
-                .next()
-                .ok_or_else(|| "usage: velra check <file.vel>".to_owned())?;
+            let path = required_arg(&mut args, "usage: velra check <file.vel>")?;
             ensure_no_extra_args(args)?;
             check_file(&path)
         }
         "compile" => {
-            let input = args
-                .next()
-                .ok_or_else(|| "usage: velra compile <input.vel> <output.velc>".to_owned())?;
-            let output = args
-                .next()
-                .ok_or_else(|| "usage: velra compile <input.vel> <output.velc>".to_owned())?;
+            let usage = "usage: velra compile <input.vel> <output.velc>";
+            let input = required_arg(&mut args, usage)?;
+            let output = required_arg(&mut args, usage)?;
             ensure_no_extra_args(args)?;
             compile_file(&input, &output)
         }
         "exec" => {
-            let path = args
-                .next()
-                .ok_or_else(|| "usage: velra exec <file.velc>".to_owned())?;
+            let path = required_arg(&mut args, "usage: velra exec <file.velc>")?;
             ensure_no_extra_args(args)?;
             exec_file(&path)
         }
@@ -159,6 +150,13 @@ fn repl() -> Result<(), String> {
 
 fn read_source(path: &str) -> Result<String, String> {
     fs::read_to_string(path).map_err(|error| format!("failed to read '{path}': {error}"))
+}
+
+fn required_arg(
+    args: &mut impl Iterator<Item = String>,
+    usage: &str,
+) -> Result<String, String> {
+    args.next().ok_or_else(|| usage.to_owned())
 }
 
 fn ensure_no_extra_args(mut args: impl Iterator<Item = String>) -> Result<(), String> {
