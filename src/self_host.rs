@@ -24,7 +24,7 @@ impl SelfHostedCompiler {
     }
 
     pub fn compile(&mut self, source: &str) -> Result<String, Error> {
-        let Expr::Call { args, .. } = &mut self.compile_call.statements[0] else {
+        let Stmt::Expr(Expr::Call { args, .. }) = &mut self.compile_call.statements[0] else {
             unreachable!("compile call must remain a call expression");
         };
         let Expr::String(value) = &mut args[0] else {
