@@ -2097,13 +2097,13 @@ fn safe_index(index: i64, len: usize) -> Option<usize> {
 
 fn string_char_at(value: &str, index: i64) -> Option<char> {
     if index >= 0 {
-        return usize::try_from(index)
-            .ok()
-            .and_then(|index| value.chars().nth(index));
+        let index = usize::try_from(index).ok()?;
+        return value.chars().nth(index);
     }
 
-    let index = safe_index(index, value.chars().count())?;
-    value.chars().nth(index)
+    let offset = index.checked_neg()?.checked_sub(1)?;
+    let offset = usize::try_from(offset).ok()?;
+    value.chars().rev().nth(offset)
 }
 
 fn string_index(value: &str, index: i64) -> RuntimeResult<char> {
@@ -2278,11 +2278,7 @@ choose(1)
             "🙂"
         );
 
-        let exclusive = slice_value(
-            &[value.clone(), Value::Int(1), Value::Int(3)],
-            false,
-        )
-        .unwrap();
+        let exclusive = slice_value(&[value.clone(), Value::Int(1), Value::Int(3)], false).unwrap();
         assert_eq!(exclusive.to_string(), "é🙂");
 
         let inclusive = slice_value(&[value, Value::Int(-3), Value::Int(-2)], true).unwrap();
