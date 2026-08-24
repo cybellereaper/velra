@@ -284,7 +284,9 @@ impl<'a> Lexer<'a> {
 
     fn identifier(&mut self) -> Token {
         let start = self.cursor;
-        let first = self.current().expect("identifier starts at current character");
+        let first = self
+            .current()
+            .expect("identifier starts at current character");
         self.cursor += first.len_utf8();
         while let Some(ch) = self.current() {
             if !is_ident_continue(ch) {
