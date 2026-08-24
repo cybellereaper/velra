@@ -152,10 +152,7 @@ fn read_source(path: &str) -> Result<String, String> {
     fs::read_to_string(path).map_err(|error| format!("failed to read '{path}': {error}"))
 }
 
-fn required_arg(
-    args: &mut impl Iterator<Item = String>,
-    usage: &str,
-) -> Result<String, String> {
+fn required_arg(args: &mut impl Iterator<Item = String>, usage: &str) -> Result<String, String> {
     args.next().ok_or_else(|| usage.to_owned())
 }
 
