@@ -1,6 +1,6 @@
 [package]
 name = "velra"
-version = "0.4.0-o1"
+version = "0.4.0-o2"
 edition = "2021"
 description = "A clean, minimal programming language with a Rust bootstrap implementation"
 license = "GPL-3.0-only"
