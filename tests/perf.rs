@@ -1,7 +1,10 @@
 use std::fmt::Write as _;
 use std::hint::black_box;
 use std::time::Instant;
-use velra::{check, compile, lexer, SelfHostedCompiler};
+use velra::{
+    check, compile, lexer, load_artifact, Interpreter, SelfHostedCompiler,
+    EMBEDDED_COMPILER_ARTIFACT,
+};
 
 fn large_source(lines: usize) -> String {
     let mut source = String::with_capacity(lines * 24);
@@ -24,6 +27,13 @@ fn measure<T>(name: &str, iterations: usize, mut run: impl FnMut() -> T) {
         elapsed.as_secs_f64() * 1_000.0,
         elapsed.as_secs_f64() * 1_000.0 / iterations as f64
     );
+}
+
+fn uncached_self_hosted_init() -> Interpreter {
+    let program = load_artifact(EMBEDDED_COMPILER_ARTIFACT).unwrap();
+    let mut interpreter = Interpreter::new();
+    interpreter.eval_program(&program).unwrap();
+    interpreter
 }
 
 #[test]
@@ -60,5 +70,15 @@ fn self_hosted_check_medium_source() {
     let mut compiler = SelfHostedCompiler::new().unwrap();
     measure("self-hosted check 100 statements", 3, || {
         compiler.check(black_box(&source)).unwrap()
+    });
+}
+
+#[test]
+#[ignore = "manual performance test"]
+fn self_hosted_initialization() {
+    let _ = SelfHostedCompiler::new().unwrap();
+    measure("self-hosted init uncached", 10, uncached_self_hosted_init);
+    measure("self-hosted init cached", 10, || {
+        SelfHostedCompiler::new().unwrap()
     });
 }
