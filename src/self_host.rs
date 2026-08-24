@@ -1,8 +1,11 @@
 use crate::ast::{Expr, Program, Stmt};
 use crate::runtime::RuntimeError;
 use crate::{load_artifact, Error, Interpreter, Value};
+use std::sync::OnceLock;
 
 pub const EMBEDDED_COMPILER_ARTIFACT: &str = include_str!("../compiler/bootstrap.velc");
+
+static EMBEDDED_COMPILER_PROGRAM: OnceLock<Program> = OnceLock::new();
 
 pub struct SelfHostedCompiler {
     interpreter: Interpreter,
@@ -10,9 +13,9 @@ pub struct SelfHostedCompiler {
 
 impl SelfHostedCompiler {
     pub fn new() -> Result<Self, Error> {
-        let program = load_artifact(EMBEDDED_COMPILER_ARTIFACT)?;
+        let program = embedded_compiler_program()?;
         let mut interpreter = Interpreter::new();
-        interpreter.eval_program(&program)?;
+        interpreter.eval_program(program)?;
         Ok(Self { interpreter })
     }
 
@@ -44,6 +47,18 @@ impl Default for SelfHostedCompiler {
     fn default() -> Self {
         Self::new().expect("embedded compiler artifact must be valid")
     }
+}
+
+fn embedded_compiler_program() -> Result<&'static Program, Error> {
+    if let Some(program) = EMBEDDED_COMPILER_PROGRAM.get() {
+        return Ok(program);
+    }
+
+    let program = load_artifact(EMBEDDED_COMPILER_ARTIFACT)?;
+    let _ = EMBEDDED_COMPILER_PROGRAM.set(program);
+    Ok(EMBEDDED_COMPILER_PROGRAM
+        .get()
+        .expect("embedded compiler program must be initialized"))
 }
 
 #[cfg(test)]
