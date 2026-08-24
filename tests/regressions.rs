@@ -4,10 +4,7 @@ use velra::{artifact, compile, lexer, run, run_artifact};
 fn unicode_string_indexing_and_slicing_use_character_offsets() {
     assert_eq!(run("get(\"aé🙂z\", 1)").unwrap().to_string(), "é");
     assert_eq!(run("get(\"aé🙂z\", -2)").unwrap().to_string(), "🙂");
-    assert_eq!(
-        run("slice(\"aé🙂z\", 1, 3)").unwrap().to_string(),
-        "é🙂"
-    );
+    assert_eq!(run("slice(\"aé🙂z\", 1, 3)").unwrap().to_string(), "é🙂");
     assert_eq!(
         run("slice_inclusive(\"aé🙂z\", -3, -2)")
             .unwrap()
@@ -32,10 +29,7 @@ fn artifact_round_trip_preserves_unicode_and_escapes() {
     let source = "value = \"é🙂\\n\\\"ok\\\"\"\nvalue";
     let encoded = compile(source).unwrap();
 
-    assert_eq!(
-        run_artifact(&encoded).unwrap().to_string(),
-        "é🙂\n\"ok\""
-    );
+    assert_eq!(run_artifact(&encoded).unwrap().to_string(), "é🙂\n\"ok\"");
 }
 
 #[test]
