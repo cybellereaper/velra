@@ -4,7 +4,7 @@ version = "0.4.0-o2"
 edition = "2021"
 description = "A clean, minimal programming language with a Rust bootstrap implementation"
 license = "GPL-3.0-only"
-repository = "https://github.com/cybellereaper/velra"
+repository = "https://github.com/aliceblackrose/velra"
 rust-version = "1.74"
 
 [lib]
